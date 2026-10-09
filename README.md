@@ -15,7 +15,7 @@ An unofficial **Oh My Pi (OMP)** extension showing **remaining OpenAI Codex quot
 
 **OMP 18.8.6+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Developed on Windows OMP 18.8.6; this help-command update was tested with OMP 18.8.7. Real macOS/Linux testing is pending.
 
-## Install with npm
+## Install
 
 **Install from the npm registry:**
 
@@ -26,6 +26,26 @@ omp plugin install omp-codex-remaining
 **npm package:** [`omp-codex-remaining`](https://www.npmjs.com/package/omp-codex-remaining). Alternatively, download [codex-remaining.ts](./codex-remaining.ts) into `~/.omp/agent/extensions/` and restart OMP.
 
 Once installed, restart OMP or use `/reload`. No manual `config.yml` registration is needed for a standard npm plugin installation.
+
+### Update
+
+When a new version is published to npm, run:
+
+```sh
+omp plugin upgrade omp-codex-remaining
+```
+
+Restart OMP (or use `/reload`) after upgrading. You can check the installed version with `omp plugin list`.
+
+**Update notifications:** In OMP 18.8.7, npm-installed plugins do not have a confirmed user-visible automatic update notification. This extension does not independently check npm for new releases or auto-update itself; check the [npm package](https://www.npmjs.com/package/omp-codex-remaining) for releases and run the command above when needed.
+
+### Uninstall
+
+```sh
+omp plugin uninstall omp-codex-remaining
+```
+
+Restart OMP afterward. The saved layout preference is stored separately in `codex-remaining-settings.json` and can be deleted manually if you want to reset it.
 
 **Migrating from the standalone extension:** after confirming the npm install succeeded, move or delete the old copy from `~/.omp/agent/extensions/`. If you previously added that standalone path to `config.yml` under `extensions:`, remove only that entry, then restart OMP. Keeping both copies may register duplicate commands/widgets.
 
@@ -59,17 +79,10 @@ If a **custom** OMP status line contains the built-in `usage` segment, the exten
 - Check `omp --version` if the extension cannot find the OMP executable.
 - Restart OMP once after an automatic custom status-line change.
 
-## Update / uninstall
-
-```sh
-omp plugin upgrade omp-codex-remaining
-omp plugin uninstall omp-codex-remaining
-```
-
 ## Testing
 
 With Bun installed, run `bun run test` from this repository to check the help behavior and command routing. Tests are included in GitHub but excluded from the published npm tarball.
 
 ## License
 
-[MIT](./LICENSE), copyright 2026 67070194. Unofficial and not affiliated with OpenAI or Oh My Pi.
+[MIT](./LICENSE), copyright 2026 Athikarn. Maintained by **Athikarn** ([npm profile](https://www.npmjs.com/~athikarn)). Unofficial and not affiliated with OpenAI or Oh My Pi.

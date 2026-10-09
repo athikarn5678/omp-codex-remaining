@@ -4,6 +4,7 @@
   "description": "Display remaining OpenAI Codex quotas in Oh My Pi with compact and progress-bar layouts",
   "type": "module",
   "license": "MIT",
+  "author": "Athikarn",
   "scripts": {
     "test": "bun run tests/codex-remaining-help.test.ts"
   },
