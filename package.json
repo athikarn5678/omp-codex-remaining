@@ -1,0 +1,29 @@
+{
+  "name": "omp-codex-remaining",
+  "version": "0.1.0",
+  "description": "Display remaining OpenAI Codex quotas in Oh My Pi with compact and progress-bar layouts",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/67070194/omp-codex-remaining.git"
+  },
+  "keywords": [
+    "oh-my-pi",
+    "omp",
+    "codex",
+    "openai",
+    "extension",
+    "usage",
+    "quota",
+    "statusline"
+  ],
+  "files": [
+    "codex-remaining.ts"
+  ],
+  "omp": {
+    "extensions": [
+      "./codex-remaining.ts"
+    ]
+  }
+}

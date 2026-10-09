@@ -1,47 +1,68 @@
-# Codex Remaining
+# Codex Remaining for Oh My Pi
 
-An unofficial Oh My Pi extension that shows remaining OpenAI Codex quota in the terminal.
+An unofficial **Oh My Pi (OMP)** extension showing **remaining OpenAI Codex quota** below the editor.
 
 ## Features
 
-Compact and Bars layouts; 5h and 7d remaining quota; five color levels; reset dates and countdowns; reset credits; Tab completions; automatic refresh.
+- **Compact:** 5h/7d remaining percentages, reset countdowns, plan, and reset credits.
+- **Bars (default):** two colored progress bars with reset date/time in your local timezone.
+- Five colors: 0–20% red, 21–40% orange, 41–60% yellow, 61–80% lime, 81–100% green.
+- Automatically refreshes usage every 5 minutes, countdowns every 30 seconds.
+- Tab completion for layouts; remembers the selected layout.
+- Uses local `omp usage` (no separate API key).
 
-## Install
+## Requirements
 
-Requires OMP 18.8.6+ and a connected Codex account. Download `codex-remaining.ts` to `~/.omp/agent/extensions/` and restart OMP. No separate API key is needed.
+**OMP 18.8.6+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Tested on Windows OMP 18.8.6; real macOS/Linux testing is pending.
 
-Windows CMD:
+## Install with npm
 
-```cmd
-curl.exe -fL https://raw.githubusercontent.com/67070194/omp-codex-remaining/main/codex-remaining.ts -o "%USERPROFILE%\.omp\agent\extensions\codex-remaining.ts"
+After the first npm release, install using:
+
+```sh
+omp plugin install omp-codex-remaining
 ```
 
-macOS/Linux:
+**Publishing status:** The GitHub source is available before the npm release. Until the package is published, npm may report `404 Not Found`. You can manually download [codex-remaining.ts](./codex-remaining.ts) into `~/.omp/agent/extensions/` and restart OMP.
 
-```bash
-mkdir -p ~/.omp/agent/extensions
-curl -fLsS https://raw.githubusercontent.com/67070194/omp-codex-remaining/main/codex-remaining.ts -o ~/.omp/agent/extensions/codex-remaining.ts
-```
+Once installed, restart OMP or use `/reload`. No manual `config.yml` registration is needed for a standard npm plugin installation.
+
+**Migrating from the standalone extension:** after confirming the npm install succeeded, move or delete the old copy from `~/.omp/agent/extensions/`. If you previously added that standalone path to `config.yml` under `extensions:`, remove only that entry, then restart OMP. Keeping both copies may register duplicate commands/widgets.
 
 ## Commands
 
-- `/codex-remaining compact` — single-line display
-- `/codex-remaining bars` — bars and reset dates (default)
-- `/codex-remaining toggle` — switch layouts
-- `/codex-remaining` or `/codex-remaining refresh` — refresh quota
+| Command | Action |
+| --- | --- |
+| `/codex-remaining compact` | One-line display without bars |
+| `/codex-remaining bars` | Two progress bars (default) |
+| `/codex-remaining toggle` | Switch layouts |
+| `/codex-remaining` | Force-refresh |
+| `/codex-remaining refresh` | Force-refresh |
 
-Type `/codex-remaining ` with a space, then Tab, to choose a layout.
+Type `/codex-remaining ` (with a trailing space) and press Tab to select `compact` or `bars`.
 
-## Configuration warning
+The layout preference is saved automatically to `codex-remaining-settings.json` under the directory returned by `omp config path`.
 
-If your custom native OMP status line includes `usage`, the extension backs up `config.yml`, removes just that segment from the custom status line, and asks for one OMP restart. This can affect native usage display for other providers. Standard presets are unchanged. Layout settings are saved automatically.
+## Native status-line behavior
 
-## Compatibility
+If a **custom** OMP status line contains the built-in `usage` segment, the extension makes a dated `config.yml` backup, removes only that `usage` segment from custom left/right segment lists, then asks you to restart OMP. If backup or verification fails, the widget pauses instead of overwriting configuration.
 
-Tested on Windows OMP 18.8.6. macOS/Linux support has not been verified on real devices. Requires OMP on PATH or discoverable as the running executable. The widget appears only for an `openai-codex` model and reads from `omp usage`.
+**Important:** removing native `usage` may also hide usage for other model providers. Restore the segment manually or restore the backup if needed. Standard OMP status-line presets are untouched.
+
+## Troubleshooting
+
+- Select an `openai-codex` model for the widget to appear.
+- Check `omp usage --provider openai-codex --json --redact` if no quota appears.
+- Check `omp --version` if the extension cannot find the OMP executable.
+- Restart OMP once after an automatic custom status-line change.
+
+## Update / uninstall
+
+```sh
+omp plugin upgrade omp-codex-remaining
+omp plugin uninstall omp-codex-remaining
+```
 
 ## License
 
-MIT. Copyright 2026 67070194.
-
-Unofficial project, not affiliated with OpenAI or Oh My Pi maintainers.
+[MIT](./LICENSE), copyright 2026 67070194. Unofficial and not affiliated with OpenAI or Oh My Pi.
