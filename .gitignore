@@ -1,0 +1,16 @@
+.omp/
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+coverage/
+.cache/
+*.key
+*.pem
+*.bak
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
