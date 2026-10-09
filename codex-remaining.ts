@@ -342,6 +342,24 @@ async function getReport(): Promise<Report | undefined> {
   return parsed.reports?.find(x => x.provider === "openai-codex");
 }
 
+/** Displayed by the bare slash command and the explicit help alias. */
+export function helpLines(mode: DisplayMode): string[] {
+  return [
+    `Current layout: ${mode}`,
+    "",
+    "/codex-remaining             Show this help",
+    "/codex-remaining help        Show this help",
+    "/codex-remaining compact     Single-line quota summary",
+    "/codex-remaining bars        Two quota bars with reset times",
+    "/codex-remaining toggle      Switch between layouts",
+    "/codex-remaining refresh     Force-refresh Codex usage",
+    "",
+    "Auto-refresh: every 5 min; countdowns: every 30 sec",
+    "Tab: type /codex-remaining followed by a space, then Tab",
+    "Press Enter, Esc or q to close",
+  ];
+}
+
 export default function codexRemaining(pi: ExtensionAPI): void {
   let report: Report | undefined;
   // Default to the existing progress-bar layout on first install/update.
@@ -477,8 +495,40 @@ export default function codexRemaining(pi: ExtensionAPI): void {
     if (ctx.mode === "tui" && ctx.agent.kind === "main") clear(ctx);
   });
 
+  const showHelp = async (ctx: ExtensionContext): Promise<void> => {
+    const entries = helpLines(displayMode);
+    await ctx.ui.custom<void>((_tui, theme, _keybindings, done) => ({
+      render(width: number) {
+        const available = Math.floor(width);
+        if (available < 8) return [fitAnsi("Codex Remaining Help", Math.max(0, available))];
+
+        const innerWidth = Math.min(76, available - 2);
+        const rows = entries.map(entry => fitAnsi(entry, innerWidth - 2));
+        const border = (text: string) => theme.fg("text", text);
+        const title = "─ Codex Remaining · Help ";
+        const topRule = innerWidth >= Bun.stringWidth(title)
+          ? title + "─".repeat(innerWidth - Bun.stringWidth(title))
+          : "─".repeat(innerWidth);
+        return [
+          border("╭" + topRule + "╮"),
+          ...rows.map((row, index) => {
+            const styled = index === 0 ? theme.fg("accent", row) : row;
+            return border("│") + " " + styled
+              + " ".repeat(Math.max(0, innerWidth - 1 - Bun.stringWidth(row))) + border("│");
+          }),
+          border("╰" + "─".repeat(innerWidth) + "╯"),
+        ];
+      },
+      handleInput(input: string) {
+        if (input === "\r" || input === "\n" || input === "\x1b" || input.toLowerCase() === "q") {
+          done();
+        }
+      },
+    }), { overlay: true });
+  };
+
   pi.registerCommand("codex-remaining", {
-    description: "Switch Codex Remaining layout: compact | bars (no argument: refresh)",
+    description: "Show Codex Remaining help; subcommands: compact | bars | toggle | refresh | help",
     getArgumentCompletions(argumentPrefix) {
       if (argumentPrefix.includes(" ")) return null;
       const prefix = argumentPrefix.trim().toLowerCase();
@@ -502,11 +552,14 @@ export default function codexRemaining(pi: ExtensionAPI): void {
           ctx.ui.notify(`Codex Remaining: ${displayMode} mode (could not save preference).`, "warning");
         }
         await refresh(ctx);
-      } else if (arg === "" || arg === "refresh") {
+      } else if (arg === "" || arg === "help") {
+        await showHelp(ctx);
+      } else if (arg === "refresh") {
         await refresh(ctx, true);
         ctx.ui.notify("Codex remaining quota refreshed.", "info");
       } else {
-        ctx.ui.notify("Usage: /codex-remaining compact | bars | toggle | refresh", "warning");
+        ctx.ui.notify("Unknown subcommand. Use /codex-remaining or /codex-remaining help.", "warning");
+        await showHelp(ctx);
       }
     },
   });

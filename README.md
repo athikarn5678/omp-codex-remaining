@@ -13,7 +13,7 @@ An unofficial **Oh My Pi (OMP)** extension showing **remaining OpenAI Codex quot
 
 ## Requirements
 
-**OMP 18.8.6+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Tested on Windows OMP 18.8.6; real macOS/Linux testing is pending.
+**OMP 18.8.6+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Developed on Windows OMP 18.8.6; this help-command update was tested with OMP 18.8.7. Real macOS/Linux testing is pending.
 
 ## Install with npm
 
@@ -23,7 +23,7 @@ An unofficial **Oh My Pi (OMP)** extension showing **remaining OpenAI Codex quot
 omp plugin install omp-codex-remaining
 ```
 
-**Published on npm:** [`omp-codex-remaining`](https://www.npmjs.com/package/omp-codex-remaining) (current initial release `0.1.0`). As an alternative, manually download [codex-remaining.ts](./codex-remaining.ts) into `~/.omp/agent/extensions/` and restart OMP.
+**npm package:** [`omp-codex-remaining`](https://www.npmjs.com/package/omp-codex-remaining). Alternatively, download [codex-remaining.ts](./codex-remaining.ts) into `~/.omp/agent/extensions/` and restart OMP.
 
 Once installed, restart OMP or use `/reload`. No manual `config.yml` registration is needed for a standard npm plugin installation.
 
@@ -36,8 +36,11 @@ Once installed, restart OMP or use `/reload`. No manual `config.yml` registratio
 | `/codex-remaining compact` | One-line display without bars |
 | `/codex-remaining bars` | Two progress bars (default) |
 | `/codex-remaining toggle` | Switch layouts |
-| `/codex-remaining` | Force-refresh |
-| `/codex-remaining refresh` | Force-refresh |
+| `/codex-remaining` | Open the interactive command help |
+| `/codex-remaining help` | Open the same command help |
+| `/codex-remaining refresh` | Force-refresh Codex usage now |
+
+The Help screen lists the commands, current layout and automatic refresh schedule. Close it with **Enter**, **Esc** or **q**. Opening Help does not fetch new quota data.
 
 Type `/codex-remaining ` (with a trailing space) and press Tab to select `compact` or `bars`.
 
@@ -62,6 +65,10 @@ If a **custom** OMP status line contains the built-in `usage` segment, the exten
 omp plugin upgrade omp-codex-remaining
 omp plugin uninstall omp-codex-remaining
 ```
+
+## Testing
+
+With Bun installed, run `bun run test` from this repository to check the help behavior and command routing. Tests are included in GitHub but excluded from the published npm tarball.
 
 ## License
 
