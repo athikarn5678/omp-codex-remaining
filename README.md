@@ -17,13 +17,13 @@ An unofficial **Oh My Pi (OMP)** extension showing **remaining OpenAI Codex quot
 
 ## Install with npm
 
-After the first npm release, install using:
+**Install from the npm registry:**
 
 ```sh
 omp plugin install omp-codex-remaining
 ```
 
-**Publishing status:** The GitHub source is available before the npm release. Until the package is published, npm may report `404 Not Found`. You can manually download [codex-remaining.ts](./codex-remaining.ts) into `~/.omp/agent/extensions/` and restart OMP.
+**Published on npm:** [`omp-codex-remaining`](https://www.npmjs.com/package/omp-codex-remaining) (current initial release `0.1.0`). As an alternative, manually download [codex-remaining.ts](./codex-remaining.ts) into `~/.omp/agent/extensions/` and restart OMP.
 
 Once installed, restart OMP or use `/reload`. No manual `config.yml` registration is needed for a standard npm plugin installation.
 
