@@ -8,12 +8,12 @@ An unofficial **Oh My Pi (OMP)** extension showing **remaining OpenAI Codex quot
 - **Bars (default):** two colored progress bars with reset date/time in your local timezone.
 - Five colors: 0–20% red, 21–40% orange, 41–60% yellow, 61–80% lime, 81–100% green.
 - Automatically refreshes usage every 5 minutes, countdowns every 30 seconds.
-- Tab completion for layouts; remembers the selected layout.
+- Tab completion for every command, with descriptive options; remembers the selected layout.
 - Uses local `omp usage` (no separate API key).
 
 ## Requirements
 
-**OMP 18.8.6+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Developed on Windows OMP 18.8.6; this help-command update was tested with OMP 18.8.7. Real macOS/Linux testing is pending.
+**OMP 18.8.7+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Tested on Windows OMP 18.8.7; real macOS/Linux testing is pending.
 
 ## Install
 
@@ -62,7 +62,7 @@ Restart OMP afterward. The saved layout preference is stored separately in `code
 
 The Help screen lists the commands, current layout and automatic refresh schedule. Close it with **Enter**, **Esc** or **q**. Opening Help does not fetch new quota data.
 
-Type `/codex-remaining ` (with a trailing space) and press Tab to select `compact` or `bars`.
+**Tab autocomplete:** Type `/codex-remaining` and press **Tab** to open all five subcommands (`help`, `compact`, `bars`, `toggle`, `refresh`) with a description beside each option. Select a command from the list and press Enter to run it. Autocomplete also works after a space, for example `/codex-remaining ` + Tab, and filters as you type (e.g. `/codex-remaining re` + Tab).
 
 The layout preference is saved automatically to `codex-remaining-settings.json` under the directory returned by `omp config path`.
 

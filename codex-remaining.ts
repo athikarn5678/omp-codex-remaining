@@ -1,5 +1,5 @@
 /**
- * Codex Remaining (OMP 18.8.6+) — five-level ANSI color, theme-aware reset timer.
+ * Codex Remaining (OMP 18.8.7+) — five-level ANSI color, theme-aware reset timer.
  *
  * The built-in `status` segment sanitizes ANSI and applies one accent to the
  * entire string. Instead use the officially supported, styled single-line widget
@@ -8,6 +8,7 @@
  * Standalone: no installation into OMP's bundled JavaScript is needed.
  */
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { AutocompleteProvider } from "@oh-my-pi/pi-tui";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { copyFile, readFile, writeFile } from "node:fs/promises";
@@ -342,6 +343,67 @@ async function getReport(): Promise<Report | undefined> {
   return parsed.reports?.find(x => x.provider === "openai-codex");
 }
 
+const COMMAND_PREFIX = "/codex-remaining";
+const SUBCOMMANDS = [
+  { label: "help", description: "Show all Codex Remaining commands" },
+  { label: "compact", description: "Single-line quota summary" },
+  { label: "bars", description: "Two quota bars with reset times" },
+  { label: "toggle", description: "Switch between compact and bars" },
+  { label: "refresh", description: "Force-refresh Codex usage now" },
+] as const;
+
+/** Complete all subcommands when the cursor is after /codex-remaining and a space. */
+export function subcommandCompletions(argumentPrefix: string) {
+  if (argumentPrefix.includes(" ")) return null;
+  const prefix = argumentPrefix.trim().toLowerCase();
+  const matching = SUBCOMMANDS.filter(item => item.label.startsWith(prefix));
+  return matching.length > 0
+    ? matching.map(item => ({ label: item.label, value: item.label + " ", description: item.description }))
+    : null;
+}
+
+/**
+ * OMP normally offers slash-command names (not arguments) before the first
+ * space. Intercept only the exact /codex-remaining token so Tab can list its
+ * subcommands without requiring an extra space. Delegate everything else.
+ */
+export function withCodexRemainingTab(current: AutocompleteProvider): AutocompleteProvider {
+  const matches = SUBCOMMANDS.map(item => ({
+    label: item.label,
+    value: "codex-remaining " + item.label,
+    description: item.description,
+  }));
+  const completeBareCommand = (text: string) =>
+    text === COMMAND_PREFIX ? { items: matches, prefix: text } : null;
+
+  return {
+    async getSuggestions(lines, cursorLine, cursorCol, signal, onPartial) {
+      const text = lines[cursorLine]?.slice(0, cursorCol) ?? "";
+      const suggestions = cursorLine === 0 ? completeBareCommand(text) : null;
+      return suggestions ?? current.getSuggestions(lines, cursorLine, cursorCol, signal, onPartial);
+    },
+    applyCompletion: (lines, cursorLine, cursorCol, item, prefix) =>
+      current.applyCompletion(lines, cursorLine, cursorCol, item, prefix),
+    trySyncSlashCompletion: text =>
+      completeBareCommand(text) ?? current.trySyncSlashCompletion?.(text) ?? null,
+    ...(current.getInlineHint && {
+      getInlineHint: (lines: string[], line: number, col: number) =>
+        current.getInlineHint!(lines, line, col),
+    }),
+    ...(current.trySyncInlineReplace && {
+      trySyncInlineReplace: (text: string) => current.trySyncInlineReplace!(text),
+    }),
+    ...(current.getForceFileSuggestions && {
+      getForceFileSuggestions: (lines: string[], line: number, col: number, signal?: AbortSignal) =>
+        current.getForceFileSuggestions!(lines, line, col, signal),
+    }),
+    ...(current.shouldTriggerFileCompletion && {
+      shouldTriggerFileCompletion: (lines: string[], line: number, col: number) =>
+        current.shouldTriggerFileCompletion!(lines, line, col),
+    }),
+  };
+}
+
 /** Displayed by the bare slash command and the explicit help alias. */
 export function helpLines(mode: DisplayMode): string[] {
   return [
@@ -355,7 +417,7 @@ export function helpLines(mode: DisplayMode): string[] {
     "/codex-remaining refresh     Force-refresh Codex usage",
     "",
     "Auto-refresh: every 5 min; countdowns: every 30 sec",
-    "Tab: type /codex-remaining followed by a space, then Tab",
+    "Tab: type /codex-remaining and press Tab to choose",
     "Press Enter, Esc or q to close",
   ];
 }
@@ -482,6 +544,7 @@ export default function codexRemaining(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.mode !== "tui" || ctx.agent.kind !== "main") return;
+    ctx.ui.addAutocompleteProvider(withCodexRemainingTab);
     await initializeSettingsPath();
     await loadMode();
     await prepareNativeLayout(ctx);
@@ -529,16 +592,7 @@ export default function codexRemaining(pi: ExtensionAPI): void {
 
   pi.registerCommand("codex-remaining", {
     description: "Show Codex Remaining help; subcommands: compact | bars | toggle | refresh | help",
-    getArgumentCompletions(argumentPrefix) {
-      if (argumentPrefix.includes(" ")) return null;
-      const prefix = argumentPrefix.trim().toLowerCase();
-      const choices = [
-        { label: "compact", value: "compact ", description: "Single-line status without bars" },
-        { label: "bars", value: "bars ", description: "Two colored quota bars with reset dates" },
-      ];
-      const matches = choices.filter(choice => choice.label.startsWith(prefix));
-      return matches.length ? matches : null;
-    },
+    getArgumentCompletions: subcommandCompletions,
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
       if (arg === "compact" || arg === "bars" || arg === "toggle") {
