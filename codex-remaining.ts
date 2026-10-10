@@ -10,7 +10,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { AutocompleteProvider } from "@oh-my-pi/pi-tui";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
 import { fetchTiboSummary, parseTiboCache, tiboInline, TIBO_REFRESH_MS, type TiboSummary } from "./tibo.ts";
 import { fetchForecast, forecastDetails, forecastInline, parseForecastCache, FORECAST_REFRESH_MS, type ForecastData, type ForecastState } from "./forecast.ts";
@@ -20,11 +20,21 @@ const STATUS_KEY = "codex-remaining"; // clear legacy status from the prior vers
 const REFRESH_MS = 5 * 60_000;
 const TICK_MS = 30_000;
 const ANSI_DEFAULT_FG = "\x1b[39m";
-export const EXTENSION_VERSION = "0.1.9";
+export const EXTENSION_VERSION = "0.1.10";
 const UPDATE_CHECK_MS = 24 * 60 * 60_000;
 const NPM_LATEST_URL = "https://registry.npmjs.org/omp-codex-remaining/latest";
 export type DisplayMode = "compact" | "bars";
-const SETTINGS_PATH = join(homedir(), ".omp", "agent", "codex-remaining-settings.json");
+export function resolveSettingsPath(
+  env: Record<string,string|undefined> = process.env,
+  home: string = homedir(),
+): string {
+  // OMP sets PI_CODING_AGENT_DIR when using a custom agent directory or
+  // activated profile. Reading it directly avoids spawning `omp config path`
+  // (~0.7s on Windows) on normal startups.
+  const agentDir = env.PI_CODING_AGENT_DIR?.trim();
+  return join(agentDir ? resolve(agentDir) : join(home, ".omp", "agent"), "codex-remaining-settings.json");
+}
+const SETTINGS_PATH = resolveSettingsPath();
 
 type Limit = {
   scope?: { windowId?: string };
@@ -249,7 +259,7 @@ export function frameRemaining(
 
   const content = [...headerRows, ...barRows];
   const innerWidth = Math.max(...content.map(row => Bun.stringWidth(row))) + 2;
-  const title = "─ Codex Remaining ";
+  const title = "─ Codex Summary ";
   const topRule = innerWidth >= Bun.stringWidth(title)
     ? title + "─".repeat(innerWidth - Bun.stringWidth(title))
     : "─".repeat(innerWidth);
@@ -479,6 +489,13 @@ export function createQuotaPoller(
       }
     },
   };
+}
+
+/** Avoid rebuilding OMP widgets twice on a cache-only countdown tick. */
+export function quotaSnapshotChanged(before: QuotaPollState, after: QuotaPollState): boolean {
+  return before.report !== after.report ||
+    before.lastSuccessAt !== after.lastSuccessAt ||
+    before.lastAttemptFailed !== after.lastAttemptFailed;
 }
 
 /** Show failures without confusing old quota values for fresh usage. */
@@ -1093,6 +1110,7 @@ export default function codexRemaining(pi: ExtensionAPI): void {
     }
     // Instant: render cached quota or a nonblocking loading state BEFORE the
     // OMP CLI (~0.8s) fetch completes. Old quota is explicitly marked stale.
+    const before = quotas.getState();
     show(ctx);
     const ok = await quotas.refresh(force);
     // A model switch can occur while the CLI subprocess is still resolving.
@@ -1100,8 +1118,11 @@ export default function codexRemaining(pi: ExtensionAPI): void {
       clear(ctx);
       return false;
     }
-    show(ctx);
     const state = quotas.getState();
+    // On a cached 30s countdown tick the first draw is already enough.
+    // Avoid a duplicate OMP UI rebuild unless fresh data or failure state
+    // actually changed.
+    if (quotaSnapshotChanged(before, state)) show(ctx);
     const latest = state.report;
     if (ok && latest && state.lastSuccessAt > persistedQuotaAt) {
       const snapshot = parseQuotaSnapshot(latest);
@@ -1224,10 +1245,15 @@ export default function codexRemaining(pi: ExtensionAPI): void {
   const refreshCommunity = (ctx: ExtensionContext): Promise<void> => {
     if (communityPending) return communityPending;
     const batch = (async () => {
+      const previousTibo = tibo;
+      const previousForecast = forecast;
       await Promise.allSettled([
         refreshTibo(ctx, false, false),
         refreshForecast(ctx, false, false),
       ]);
+      // Periodic checks run every 30s; remote data refreshes only ~20min.
+      // Do not rebuild the widget a second time on unchanged data.
+      if (tibo === previousTibo && forecast === previousForecast) return;
       displayedTibo = tibo;
       displayedForecast = forecast;
       if (sessionActive && preferences.tiboEnabled &&
@@ -1324,7 +1350,14 @@ export default function codexRemaining(pi: ExtensionAPI): void {
       void prepareNativeLayout(ctx).then(() => {
         if (sessionActive && !nativeLayoutReady) clear(ctx);
       });
-      void initializeSettingsPath();
+      // OMP usually provides the agent directory via the environment or
+      // uses ~/.omp/agent. Only ask its CLI for a path under unusual XDG
+      // setups; normal startup avoids an unnecessary process entirely.
+      if (!process.env.PI_CODING_AGENT_DIR &&
+          (process.env.XDG_CONFIG_HOME || process.env.XDG_STATE_HOME ||
+           process.env.PI_PROFILE || process.env.OMP_PROFILE)) {
+        void initializeSettingsPath();
+      }
     })().catch(() => {});
   });
   pi.on("session_switch", (_event, ctx) => { void refresh(ctx); });
@@ -1447,7 +1480,12 @@ export default function codexRemaining(pi: ExtensionAPI): void {
         } catch {
           ctx.ui.notify(`Codex Remaining: ${preferences.mode} mode (could not save preference).`, "warning");
         }
-        await refresh(ctx);
+        // Changing layout must be instant even if the Codex CLI is slow.
+        // Render from the current local state and revalidate quota in the
+        // background; mode switching never waits for an external process.
+        // refresh() synchronously displays the new layout using local
+        // state, then fetches asynchronously. Never await an OMP subprocess.
+        void refresh(ctx);
       } else if (arg === "" || arg === "help") {
         await showHelp(ctx);
       } else if (arg === "updates") {

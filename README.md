@@ -4,10 +4,11 @@ An unofficial **Oh My Pi (OMP)** extension showing **remaining OpenAI Codex quot
 
 ## Features
 
-- **Compact:** 5h/7d remaining percentages, reset countdowns, plan, and reset credits.
+- **Compact (v0.1.10):** same single-box layout with the unified title **Codex Summary**, showing 5h/7d percentages, reset countdowns, plan, and credits. No other compact layout changes.
 - **Bars (default, v0.1.9):** two independent bordered panels: **Codex Summary** (plan/credits and optionally Tibo/Forecast) and **Quotas** (5h/7d colored progress bars). Hiding Tibo or Forecast collapses only its summary rows: no empty lines, no switch back to legacy layout. Long public-data sections wrap for small terminals.
 - Five colors: 0–20% red, 21–40% orange, 41–60% yellow, 61–80% lime, 81–100% green.
 - **Fast startup and model switching (v0.1.7+):** registers commands immediately, shows cached quota or a loading indicator before CLI fetching completes, and detects provider switches within about 250ms. Network/CLI/config checks run in the background. Cached quota is clearly marked stale until refreshed. **v0.1.9** fetches Tibo/Forecast concurrently and commits them to the visible UI as one snapshot without gating the independent quota refresh.
+- **Performance/QoL audit (v0.1.10):** switching bars/compact/toggle paints from local state immediately without awaiting the quota CLI; cached 30-second ticks avoid duplicate widget rebuilds; unchanged Tibo/Forecast snapshots skip unnecessary repaints. Standard/default OMP agent directories resolve without spawning an extra config-path CLI; custom/profile agent directories remain supported via `PI_CODING_AGENT_DIR`. Full quota and community network checks remain independent and asynchronous.
 - Automatically refreshes usage every 5 minutes, countdowns every 30 seconds; retries failures after 1 minute and marks cached data as stale.
 - Tab completion for every command, with descriptive options; remembers the selected layout.
 - **Native Right Arrow chaining (v0.1.6):** choosing `updates`, `alerts`, or `alerts threshold` opens its nested menu automatically in OMP 18.8.8, without pressing Tab again.
@@ -20,7 +21,7 @@ An unofficial **Oh My Pi (OMP)** extension showing **remaining OpenAI Codex quot
 
 ## Requirements
 
-**OMP 18.8.8+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Verified locally on Windows OMP 18.8.8 (including Editor key handling for Tab/Right Arrow); the GitHub Actions matrix is configured for Windows, macOS, and Linux, but passing CI does not replace real TUI testing on each OS.
+**OMP 18.8.8+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Verified locally on Windows OMP 18.8.9 (Editor key handling originally tested with OMP 18.8.8); the GitHub Actions matrix is configured for Windows, macOS, and Linux, but passing CI does not replace real TUI testing on each OS.
 
 ## Install
 

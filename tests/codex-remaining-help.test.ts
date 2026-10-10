@@ -82,7 +82,7 @@ assert(notices.length === 0, "help must not trigger quota-refreshed notification
 console.log("PASS bare command and help alias show modal; no force-refresh; 5 terminal widths; Enter/Esc/q close");
 
 await handler!("updates",ctx);
-assert(notices.some(n=>n.includes("npm update checks: on") && n.includes("installed v0.1.9")),
+assert(notices.some(n=>n.includes("npm update checks: on") && n.includes("installed v0.1.10")),
   "updates status reports enabled state and current version");
 await handler!("alerts",ctx);
 assert(notices.some(n=>n.includes("quota alerts: on") && n.includes("warning <=20%")),

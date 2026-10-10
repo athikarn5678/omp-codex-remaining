@@ -6,9 +6,11 @@ import {
   frameRemaining,
   parseDisplayMode,
   quotaAvailabilityNote,
+  quotaSnapshotChanged,
   reconcileNativeUsage,
   remainingHex,
   resolveOmpExecutable,
+  resolveSettingsPath,
   type Report,
 } from "../codex-remaining.ts";
 
@@ -26,6 +28,12 @@ const windows: Report = {
 const now = 1799990000000;
 const noop = (text: string) => text;
 const fresh = { report: windows, lastSuccessAt: now, lastAttemptFailed: false, nextAttempt: now + 300000 };
+assert(!quotaSnapshotChanged(fresh, {...fresh, nextAttempt: now + 900_000}),
+  "cache retry scheduling alone does not repaint unchanged UI");
+assert(quotaSnapshotChanged(fresh, {...fresh, lastAttemptFailed: true}),
+  "network failure updates stale indicator immediately");
+assert(quotaSnapshotChanged(fresh, {...fresh, report: {...windows}}),
+  "new quota report refreshes percentages and bars");
 
 assert(formatRemainingColored(windows, noop, now, noop, "bars")?.includes("Codex quotas"),
   "bar header exists with quota-only payload, without plan or credits");
@@ -49,6 +57,19 @@ for (const width of [1, 2, 5, 6, 8, 14, 25, 40, 70, 100, 140]) {
 }
 assert(parseDisplayMode("compact") === "compact", "saved compact preference");
 assert(parseDisplayMode("malformed") === "bars", "invalid preference fallback");
+const compactPreview = frameRemaining("⏱ Plus · ✦ 3 exp 12d 1h · 5h 95% · 7d 22%", noop, 110);
+assert(compactPreview.length === 3, "compact remains a single bordered panel");
+assert(compactPreview[0]?.includes("Codex Summary") &&
+  !compactPreview[0]?.includes("Codex Remaining"), "compact title matches bars summary");
+for (const width of [6,14,24,40,70,100,180]) {
+  const rows = frameRemaining("⏱ Plus · 5h 95% · 7d 22%", noop, width);
+  assert(rows.every(s => Bun.stringWidth(s) <= width), "compact header responsive at " + width);
+}
+assert(resolveSettingsPath({}, "/test/home").replace(/\\/g,"/").endsWith("/test/home/.omp/agent/codex-remaining-settings.json"),
+  "default OMP agent path without spawning CLI");
+assert(resolveSettingsPath({PI_CODING_AGENT_DIR:"/custom/omp-agent"}, "/ignored")
+  .replace(/\\/g,"/").endsWith("/custom/omp-agent/codex-remaining-settings.json"),
+  "custom/profile agent-dir environment is respected");
 const ompPath = process.platform === "win32" ? "C:\\Apps\\omp.exe" : "/usr/local/bin/omp";
 const otherPath = process.platform === "win32" ? "C:\\Apps\\bun.exe" : "/usr/local/bin/bun";
 assert(resolveOmpExecutable(() => undefined, [ompPath, otherPath]) === ompPath,
