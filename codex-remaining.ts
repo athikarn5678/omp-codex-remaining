@@ -11,8 +11,7 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent/e
 import type { AutocompleteProvider } from "@oh-my-pi/pi-tui";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { copyFile, readFile, writeFile } from "node:fs/promises";
-import { constants } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 
 const WIDGET_KEY = "codex-remaining";
 const STATUS_KEY = "codex-remaining"; // clear legacy status from the prior version
@@ -135,12 +134,16 @@ export function formatRemainingColored(
   const parts: string[] = [];
   const tier = report.metadata?.planType?.trim();
   if (tier) parts.push(accent(tier[0]!.toUpperCase() + tier.slice(1)));
+  const windows = quotaWindows(report, now);
   if (mode === "compact") {
-    for (const window of quotaWindows(report, now)) {
+    for (const window of windows) {
       const timer = window.reset ? ` (${window.reset})` : "";
       // Compact mode matches the original single-line status.
       parts.push(rgbPercent(`${window.label} ${window.pct}%${timer}`, window.pct));
     }
+  } else if (!tier && windows.length > 0) {
+    // Bars need a header even when OMP omits the subscription plan.
+    parts.push(accent("Codex quotas"));
   }
   const credits = resetCreditsText(report, now);
   if (credits) parts.push(success(credits));
@@ -272,75 +275,128 @@ async function runOmp(args: string[]): Promise<string> {
   const proc = Bun.spawn([exe, ...args], {
     stdin: "ignore", stdout: "pipe", stderr: "pipe",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
-  ]);
-  if (exitCode !== 0) {
-    // Avoid revealing CLI output from other commands or secret-bearing options.
-    throw new Error(`omp ${args[0] ?? ""} failed (exit ${exitCode}): ${stderr.slice(0, 200)}`);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try { proc.kill(); } catch { /* Process may have exited while the timer fired. */ }
+  }, 30_000);
+  try {
+    const [stdout, , exitCode] = await Promise.all([
+      new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
+    ]);
+    if (timedOut) throw new Error("OMP CLI timed out after 30 seconds");
+    if (exitCode !== 0) {
+      // Do not leak error output that might contain credentials.
+      throw new Error(`omp ${args[0] ?? ""} failed (exit ${exitCode})`);
+    }
+    return stdout.trim();
+  } finally {
+    clearTimeout(timer);
   }
-  return stdout.trim();
 }
 
 export type UsageReconciliation = { ready: boolean; changed: boolean; reason?: string };
 
 /**
- * Official OMP presets do not include the "usage" segment. Only the CUSTOM
- * preset can duplicate our widget. On custom installations, remove exactly
- * the built-in usage segment from the existing left/right arrays using OMP's
- * own config CLI. A full config backup is required BEFORE changing anything.
- *
- * The current TUI may have cached the old status-line layout. Suppress the
- * widget for that first launch; it will appear on restart without duplication.
- * A project/env override that shadows the global config is never edited here.
+ * Read-only check for duplicated native usage. Never rewrite user OMP config:
+ * removing its built-in usage could hide quota information for other providers.
+ * A custom status line that already includes usage keeps the widget paused
+ * until the user explicitly edits their own configuration.
  */
-export async function reconcileNativeUsage(
-  command: OmpCommand,
-  backup: () => Promise<void>,
-): Promise<UsageReconciliation> {
+export async function reconcileNativeUsage(command: OmpCommand): Promise<UsageReconciliation> {
   const preset = (await command(["config", "get", "statusLine.preset"])).trim();
   if (preset !== "custom") return { ready: true, changed: false };
+
   const keys = ["statusLine.leftSegments", "statusLine.rightSegments"] as const;
   const readings = await Promise.all(keys.map(key => command(["config", "get", key])));
-  const current = readings.map(raw => JSON.parse(raw) as unknown);
-  if (!current.every(value => Array.isArray(value) && value.every(x => typeof x === "string"))) {
-    return { ready: false, changed: false, reason: "Unexpected status line configuration; not modified." };
-  }
-  const segments = current as string[][];
-  if (!segments.some(items => items.includes("usage"))) return { ready: true, changed: false };
-
-  await backup(); // Refuse to edit when backup fails.
-  for (let i = 0; i < keys.length; i++) {
-    if (!segments[i]!.includes("usage")) continue;
-    const replacement = segments[i]!.filter(segment => segment !== "usage");
-    await command(["config", "set", keys[i]!, JSON.stringify(replacement)]);
-  }
-  const checked = await Promise.all(keys.map(key => command(["config", "get", key])));
-  const stillPresent = checked.some(raw => {
-    const list = JSON.parse(raw) as unknown;
-    return Array.isArray(list) && list.includes("usage");
-  });
-  return stillPresent
-    ? { ready: false, changed: true, reason: "An OMP project/environment override still enables native usage." }
-    : { ready: false, changed: true, reason: "Native usage was disabled in OMP config. Restart OMP once to activate the widget." };
-}
-
-async function backupNativeConfig(): Promise<void> {
-  const dir = (await runOmp(["config", "path"])).trim();
-  const original = join(dir, "config.yml");
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const backup = join(dir, `config.yml.pre-codex-remaining-${timestamp}.bak`);
+  let segments: unknown[];
   try {
-    await copyFile(original, backup, constants.COPYFILE_EXCL);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    segments = readings.map(raw => JSON.parse(raw) as unknown);
+  } catch {
+    return { ready: false, changed: false, reason: "Could not read custom status segments. OMP config was not changed." };
   }
+  if (!segments.every(value => Array.isArray(value) && value.every(x => typeof x === "string"))) {
+    return { ready: false, changed: false, reason: "Unexpected custom status segments. OMP config was not changed." };
+  }
+  if (segments.some(items => (items as string[]).includes("usage"))) {
+    return {
+      ready: false,
+      changed: false,
+      reason: "Custom status line already includes native usage. Codex Remaining is paused; remove that segment manually if you want the widget. OMP config was not changed.",
+    };
+  }
+  return { ready: true, changed: false };
 }
 
 async function getReport(): Promise<Report | undefined> {
   const body = await runOmp(["usage", "--provider", "openai-codex", "--json", "--redact"]);
   const parsed = JSON.parse(body) as { reports?: Report[] };
   return parsed.reports?.find(x => x.provider === "openai-codex");
+}
+
+export type QuotaPollState = {
+  report?: Report;
+  lastSuccessAt: number;
+  lastAttemptFailed: boolean;
+  nextAttempt: number;
+};
+
+/** Keep the last good quotas on transient errors, throttle retries, and dedupe concurrent requests. */
+export function createQuotaPoller(
+  fetchReport: () => Promise<Report | undefined>,
+  clock: () => number = Date.now,
+) {
+  let report: Report | undefined;
+  let lastSuccessAt = 0;
+  let lastAttemptFailed = false;
+  let nextAttempt = 0;
+  let pending: Promise<boolean> | undefined;
+
+  return {
+    getState(): QuotaPollState {
+      return { report, lastSuccessAt, lastAttemptFailed, nextAttempt };
+    },
+    async refresh(force = false): Promise<boolean> {
+      if (pending) return pending;
+      if (!force && clock() < nextAttempt) return !lastAttemptFailed && !!report;
+
+      const attempt = (async () => {
+        try {
+          const latest = await fetchReport();
+          // A response with no usable quota is not a successful refresh.
+          if (!latest || latest.provider !== "openai-codex" || quotaWindows(latest, clock()).length === 0) {
+            throw new Error("No usable Codex quota windows");
+          }
+          report = latest;
+          lastSuccessAt = clock();
+          nextAttempt = lastSuccessAt + REFRESH_MS;
+          lastAttemptFailed = false;
+          return true;
+        } catch {
+          nextAttempt = clock() + 60_000;
+          lastAttemptFailed = true;
+          return false;
+        }
+      })();
+      pending = attempt;
+      try {
+        return await attempt;
+      } finally {
+        if (pending === attempt) pending = undefined;
+      }
+    },
+  };
+}
+
+/** Show failures without confusing old quota values for fresh usage. */
+export function quotaAvailabilityNote(state: QuotaPollState, now = Date.now()): string | undefined {
+  if (!state.lastAttemptFailed) return undefined;
+  if (!state.report) return "⚠ quota unavailable · retrying";
+  const ageMinutes = Math.max(1, Math.ceil((now - state.lastSuccessAt) / 60_000));
+  const age = ageMinutes < 60
+    ? `${ageMinutes}m`
+    : `${Math.floor(ageMinutes / 60)}h${ageMinutes % 60 ? ` ${ageMinutes % 60}m` : ""}`;
+  return `⚠ stale quota · updated ${age} ago`;
 }
 
 const COMMAND_PREFIX = "/codex-remaining";
@@ -404,6 +460,29 @@ export function withCodexRemainingTab(current: AutocompleteProvider): Autocomple
   };
 }
 
+export function buildQuotaPresentation(
+  state: QuotaPollState,
+  mode: DisplayMode,
+  accent: (text: string) => string,
+  success: (text: string) => string,
+  warningStyle: (text: string) => string,
+  now = Date.now(),
+): { line?: string; progress: RemainingProgress[] } {
+  const report = state.report;
+  const quotaLine = report && formatRemainingColored(report, accent, now, success, mode);
+  const problem = quotaAvailabilityNote(state, now);
+  const warning = problem && warningStyle(problem);
+  const line = quotaLine
+    ? (warning ? quotaLine + " · " + warning : quotaLine)
+    : (warning ? "⏱ Codex · " + warning : undefined);
+  const progress = report && mode === "bars"
+    ? quotaWindows(report, now)
+        .filter(window => window.label === "5h" || window.label === "7d")
+        .map(window => ({ label: window.label, pct: window.pct, resetAt: window.resetAt, reset: window.reset }))
+    : [];
+  return { line, progress };
+}
+
 /** Displayed by the bare slash command and the explicit help alias. */
 export function helpLines(mode: DisplayMode): string[] {
   return [
@@ -423,12 +502,9 @@ export function helpLines(mode: DisplayMode): string[] {
 }
 
 export default function codexRemaining(pi: ExtensionAPI): void {
-  let report: Report | undefined;
+  const quotas = createQuotaPoller(getReport);
   // Default to the existing progress-bar layout on first install/update.
   let displayMode: DisplayMode = "bars";
-  let fetchedAt = 0;
-  let nextAttempt = 0;
-  let inFlight: Promise<void> | undefined;
   let nativeLayoutReady = true;
   let settingsPath = SETTINGS_PATH;
 
@@ -442,7 +518,7 @@ export default function codexRemaining(pi: ExtensionAPI): void {
 
   const prepareNativeLayout = async (ctx: ExtensionContext): Promise<void> => {
     try {
-      const outcome = await reconcileNativeUsage(runOmp, backupNativeConfig);
+      const outcome = await reconcileNativeUsage(runOmp);
       nativeLayoutReady = outcome.ready;
       if (!nativeLayoutReady) {
         ctx.ui.notify(
@@ -474,22 +550,13 @@ export default function codexRemaining(pi: ExtensionAPI): void {
   };
   const show = (ctx: ExtensionContext): void => {
     ctx.ui.setStatus(STATUS_KEY, undefined);
-    const now = Date.now();
-    const line = report && formatRemainingColored(
-      report,
-      text => ctx.ui.theme.fg("accent", text),
-      now,
-      text => ctx.ui.theme.fg("success", text),
+    const { line, progress } = buildQuotaPresentation(
+      quotas.getState(),
       displayMode,
+      text => ctx.ui.theme.fg("accent", text),
+      text => ctx.ui.theme.fg("success", text),
+      text => ctx.ui.theme.fg("warning", text),
     );
-    const progress = report && displayMode === "bars"
-      ? quotaWindows(report, now)
-          .filter(window => window.label === "5h" || window.label === "7d")
-          .map(window => ({
-            label: window.label, pct: window.pct,
-            resetAt: window.resetAt, reset: window.reset,
-          }))
-      : [];
     ctx.ui.setWidget(
       WIDGET_KEY,
       line
@@ -509,37 +576,25 @@ export default function codexRemaining(pi: ExtensionAPI): void {
     );
   };
 
-  const refresh = async (ctx: ExtensionContext, force = false): Promise<void> => {
-    if (ctx.mode !== "tui" || ctx.agent.kind !== "main") return;
+  const refresh = async (ctx: ExtensionContext, force = false): Promise<boolean> => {
+    if (ctx.mode !== "tui" || ctx.agent.kind !== "main") return false;
     if (!nativeLayoutReady) {
       clear(ctx);
-      return;
+      return false;
     }
     const model = ctx.models.current() ?? ctx.model;
     if (model?.provider !== "openai-codex") {
       clear(ctx);
-      return;
+      return false;
     }
-    const now = Date.now();
-    if (!inFlight && (force || (now >= nextAttempt && now - fetchedAt >= REFRESH_MS))) {
-      inFlight = (async () => {
-        try {
-          const result = await getReport();
-          if (result) {
-            report = result;
-            fetchedAt = Date.now();
-            nextAttempt = fetchedAt + REFRESH_MS;
-          } else {
-            nextAttempt = Date.now() + 60_000;
-          }
-        } catch {
-          // Preserve last available quota on a transient failure.
-          nextAttempt = Date.now() + 60_000;
-        }
-      })();
-      try { await inFlight; } finally { inFlight = undefined; }
+    const ok = await quotas.refresh(force);
+    // A model switch can occur while the CLI subprocess is still resolving.
+    if ((ctx.models.current() ?? ctx.model)?.provider !== "openai-codex") {
+      clear(ctx);
+      return false;
     }
     show(ctx);
+    return ok;
   };
 
   pi.on("session_start", async (_event, ctx) => {
@@ -609,8 +664,11 @@ export default function codexRemaining(pi: ExtensionAPI): void {
       } else if (arg === "" || arg === "help") {
         await showHelp(ctx);
       } else if (arg === "refresh") {
-        await refresh(ctx, true);
-        ctx.ui.notify("Codex remaining quota refreshed.", "info");
+        const ok = await refresh(ctx, true);
+        ctx.ui.notify(
+          ok ? "Codex remaining quota refreshed." : "Codex quota refresh failed or unavailable; keeping the last available data.",
+          ok ? "info" : "warning",
+        );
       } else {
         ctx.ui.notify("Unknown subcommand. Use /codex-remaining or /codex-remaining help.", "warning");
         await showHelp(ctx);

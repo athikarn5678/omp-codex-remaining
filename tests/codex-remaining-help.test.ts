@@ -68,8 +68,8 @@ console.log("PASS bare command and help alias show modal; no force-refresh; 5 te
 
 await handler!("refresh",ctx);
 assert(modelReads === 1, "refresh must access model");
-assert(notices.some(n=>n.includes("refreshed")), "explicit refresh feedback");
-console.log("PASS explicit /codex-remaining refresh path only");
+assert(notices.some(n=>n.includes("failed or unavailable")), "do not report a successful refresh when Codex is not active");
+console.log("PASS explicit /codex-remaining refresh path and truthful failure feedback");
 
 const baseCalls: string[] = [];
 const baseProvider: any = {

@@ -7,13 +7,13 @@ An unofficial **Oh My Pi (OMP)** extension showing **remaining OpenAI Codex quot
 - **Compact:** 5h/7d remaining percentages, reset countdowns, plan, and reset credits.
 - **Bars (default):** two colored progress bars with reset date/time in your local timezone.
 - Five colors: 0–20% red, 21–40% orange, 41–60% yellow, 61–80% lime, 81–100% green.
-- Automatically refreshes usage every 5 minutes, countdowns every 30 seconds.
+- Automatically refreshes usage every 5 minutes, countdowns every 30 seconds; retries failures after 1 minute and marks cached data as stale.
 - Tab completion for every command, with descriptive options; remembers the selected layout.
 - Uses local `omp usage` (no separate API key).
 
 ## Requirements
 
-**OMP 18.8.7+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Tested on Windows OMP 18.8.7; real macOS/Linux testing is pending.
+**OMP 18.8.7+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Verified locally on Windows OMP 18.8.7; the GitHub Actions matrix is configured for Windows, macOS, and Linux, but passing CI does not replace real TUI testing on each OS.
 
 ## Install
 
@@ -68,21 +68,23 @@ The layout preference is saved automatically to `codex-remaining-settings.json` 
 
 ## Native status-line behavior
 
-If a **custom** OMP status line contains the built-in `usage` segment, the extension makes a dated `config.yml` backup, removes only that `usage` segment from custom left/right segment lists, then asks you to restart OMP. If backup or verification fails, the widget pauses instead of overwriting configuration.
+**v0.1.3 never modifies OMP `config.yml` or built-in status-line settings.** If a custom OMP status line already contains the native `usage` segment, the extension displays a warning and **pauses its own widget** to avoid duplicate quota displays. Your original status line keeps working.
 
-**Important:** removing native `usage` may also hide usage for other model providers. Restore the segment manually or restore the backup if needed. Standard OMP status-line presets are untouched.
+If you want the Codex Remaining widget instead, explicitly inspect `omp config get statusLine.leftSegments` and `omp config get statusLine.rightSegments`. Remove only the `usage` segment from your own custom status-line configuration, preserving every other segment, then restart OMP. This is optional and **may hide native usage for other model providers**. Standard OMP status-line presets are untouched.
 
 ## Troubleshooting
 
 - Select an `openai-codex` model for the widget to appear.
 - Check `omp usage --provider openai-codex --json --redact` if no quota appears.
 - Check `omp --version` if the extension cannot find the OMP executable.
-- Restart OMP once after an automatic custom status-line change.
+- A yellow `quota unavailable` status means the last fetch failed; the extension retries automatically in 1 minute. `stale quota` means it is showing the last successful values, **not live quotas**.
+- A failed `/codex-remaining refresh` shows a warning rather than reporting false success.
+- If the widget is paused due to the custom native `usage` segment, review the read-only instructions above; the extension will not edit your configuration.
 
 ## Testing
 
-With Bun installed, run `bun run test` from this repository to check the help behavior and command routing. Tests are included in GitHub but excluded from the published npm tarball.
+With Bun installed, run `bun run test` from this repository to check Help/Autocomplete, quota rendering, refresh failures/retries, and read-only configuration behavior. Run `bun run build:check` to validate the bundle, and `npm pack --dry-run` to validate package contents. GitHub Actions runs these checks on Windows, macOS, and Linux. Tests are included in GitHub but excluded from the published npm tarball.
 
 ## License
 
-[MIT](./LICENSE), copyright 2026 Athikarn. Maintained by **Athikarn** ([npm profile](https://www.npmjs.com/~athikarn)). Unofficial and not affiliated with OpenAI or Oh My Pi.
+[MIT](./LICENSE), copyright 2026 Athikarn. Maintained by **Athikarn** ([npm profile](https://www.npmjs.com/~athikarn5678)). Unofficial and not affiliated with OpenAI or Oh My Pi.

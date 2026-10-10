@@ -5,6 +5,7 @@
 node_modules/
 dist/
 coverage/
+.build-check/
 .cache/
 *.key
 *.pem
