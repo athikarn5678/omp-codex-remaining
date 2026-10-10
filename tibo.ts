@@ -12,6 +12,7 @@ export type TiboSummary = {
   scheduled?: { type: TiboKind; scheduledFor: string; url?: string };
   fetchedAt: number;
   stale: boolean;
+  source?: "codex-resets.com" | "codex-reset.com" | "tibo.cc";
 };
 function object(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -56,6 +57,7 @@ export function parseTiboPayload(status: unknown, history: unknown, now=Date.now
   return {
     regular:choose("regular"),banked:choose("banked"),scheduled,
     fetchedAt:now,stale:s.stale===true || h.stale===true,
+    source: "codex-resets.com",
   };
 }
 const day=(iso:string)=>new Intl.DateTimeFormat("en-GB",{day:"numeric",month:"short",timeZone:"Asia/Bangkok"}).format(Date.parse(iso));
@@ -70,18 +72,66 @@ export function tiboInline(summary: TiboSummary|undefined, loading=false, now=Da
     parts.push("Next "+summary.scheduled.type+" by "+day(summary.scheduled.scheduledFor));
   return "Tibo: "+parts.join(" · ")+(stale ? " (stale)" : "");
 }
+/** Secondary archive: only confirmed Reset/BANKED events, never ordinary posts. */
+export function parseSecondaryTimeline(raw: unknown, now=Date.now()): TiboSummary | undefined {
+  const r=object(raw);
+  if(!r || !Array.isArray(r.events)) return;
+  const confirmed=r.events.filter(v=>{
+    const x=object(v);
+    return x?.confirmed===true && typeof x.announced_at==="string" &&
+      (x.group==="credits" && x.reset_kind==="banked" || x.group==="reset" && x.announcement_state==="announced");
+  });
+  const items=confirmed.map(x=>{
+    const v=object(x)!;
+    return event({
+      reset_type:v.group==="credits" ? "banked" : "regular",
+      announced_at:v.announced_at,
+      text:v.summary,
+      source:{url:v.url},
+    });
+  }).filter((x):x is TiboEvent=>!!x);
+  const choose=(type:TiboKind)=>items.filter(e=>e.type===type).sort((a,b)=>Date.parse(b.announcedAt)-Date.parse(a.announcedAt))[0];
+  const regular=choose("regular"), banked=choose("banked");
+  if(!regular&&!banked)return;
+  const updated=typeof r.updated_at==="string" ? Date.parse(r.updated_at) : NaN;
+  return {regular,banked,fetchedAt:now,stale:!Number.isFinite(updated)||now-updated>2*TIBO_REFRESH_MS,
+    source:"codex-reset.com"};
+}
 export async function fetchTiboSummary(
   request: typeof fetch = fetch,
   now=Date.now(),
 ): Promise<TiboSummary | undefined> {
-  const controller=AbortSignal.timeout(6_000);
-  const opts={headers:{Accept:"application/json"},signal:controller};
-  const [status,history]=await Promise.all([
-    request("https://tibo.cc/api/v1/status",opts),
-    request("https://tibo.cc/api/v1/resets?limit=20",opts),
-  ]);
-  if(!status.ok||!history.ok) return;
-  return parseTiboPayload(await status.json(),await history.json(),now);
+  const opts={
+    headers:{Accept:"application/json","User-Agent":"omp-codex-remaining (+https://github.com/athikarn5678/omp-codex-remaining)"},
+    signal:AbortSignal.timeout(6_000),
+  };
+  // Do not merge unrelated source timelines; choose an entire source response.
+  try {
+    const [status,history]=await Promise.all([
+      request("https://codex-resets.com/api/v1/status",opts),
+      request("https://codex-resets.com/api/v1/resets?limit=20",opts),
+    ]);
+    if(status.ok && history.ok) {
+      const fresh=parseTiboPayload(await status.json(),await history.json(),now);
+      if(fresh && !fresh.stale) return fresh;
+    }
+  } catch { /* Try alternate source. */ }
+  try {
+    const secondary=await request("https://codex-reset.com/api/timeline",opts);
+    if(secondary.ok) {
+      const fresh=parseSecondaryTimeline(await secondary.json(),now);
+      if(fresh && !fresh.stale) return fresh;
+    }
+  } catch { /* Last-resort source. */ }
+  try {
+    const [status,history]=await Promise.all([
+      request("https://tibo.cc/api/v1/status",opts),
+      request("https://tibo.cc/api/v1/resets?limit=20",opts),
+    ]);
+    if(!status.ok||!history.ok)return;
+    const parsed=parseTiboPayload(await status.json(),await history.json(),now);
+    return parsed ? {...parsed,source:"tibo.cc"} : undefined;
+  } catch {return;}
 }
 export function parseTiboCache(value:unknown): TiboSummary|undefined {
   const r=object(value);
@@ -95,5 +145,7 @@ export function parseTiboCache(value:unknown): TiboSummary|undefined {
   const scheduled=scheduledDate && Date.parse(scheduledDate)>Date.now() && !r.stale &&
     (scheduledType==="regular"||scheduledType==="banked")
     ? {type:scheduledType as TiboKind,scheduledFor:scheduledDate} : undefined;
-  return {fetchedAt:r.fetchedAt,stale:r.stale===true,regular,banked,scheduled};
+  const source=["codex-resets.com","codex-reset.com","tibo.cc"].includes(String(r.source))
+    ? r.source as TiboSummary["source"] : undefined;
+  return {fetchedAt:r.fetchedAt,stale:r.stale===true,regular,banked,scheduled,source};
 }

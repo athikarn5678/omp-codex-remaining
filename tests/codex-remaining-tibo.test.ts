@@ -32,14 +32,14 @@ console.log("PASS Tibo regular/banked, scheduled deadline, stale, unavailable, c
 let requestCount=0;
 const response=async(url:string,options?:any)=>{
  requestCount++;
- assert(url.startsWith("https://tibo.cc/api/v1/"),"only Tibo public endpoints used");
+ assert(url.startsWith("https://codex-resets.com/api/v1/"),"primary public reset endpoints used");
  assert(options?.signal instanceof AbortSignal,"network timeout");
  return Response.json(url.includes("status") ? status: history);
 };
 const fetched=await fetchTiboSummary(response as typeof fetch,now);
 assert(requestCount===2 && fetched?.regular?.type==="regular","parallel read-only endpoints");
 assert(await fetchTiboSummary((async()=>new Response("bad",{status:503})) as typeof fetch,now)===undefined,"HTTP errors handled without fake data");
-console.log("PASS live-request contract and errors");
+console.log("PASS primary read-only request contract and three-source fallback errors");
 
 const quota={provider:"openai-codex",metadata:{planType:"plus"},limits:[
   {scope:{windowId:"5h"},amount:{remainingFraction:0.5},window:{resetsAt:now+3600_000}},

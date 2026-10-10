@@ -13,13 +13,14 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
 import { fetchTiboSummary, parseTiboCache, tiboInline, TIBO_REFRESH_MS, type TiboSummary } from "./tibo.ts";
+import { fetchForecast, forecastDetails, forecastInline, parseForecastCache, FORECAST_REFRESH_MS, type ForecastData, type ForecastState } from "./forecast.ts";
 
 const WIDGET_KEY = "codex-remaining";
 const STATUS_KEY = "codex-remaining"; // clear legacy status from the prior version
 const REFRESH_MS = 5 * 60_000;
 const TICK_MS = 30_000;
 const ANSI_DEFAULT_FG = "\x1b[39m";
-export const EXTENSION_VERSION = "0.1.7";
+export const EXTENSION_VERSION = "0.1.8";
 const UPDATE_CHECK_MS = 24 * 60 * 60_000;
 const NPM_LATEST_URL = "https://registry.npmjs.org/omp-codex-remaining/latest";
 export type DisplayMode = "compact" | "bars";
@@ -218,7 +219,13 @@ export function frameRemaining(
   if (available < 6) return [fitAnsi(coloredLine, available)];
 
   const maxContentCells = available - 4;
-  const line = fitAnsi(coloredLine, maxContentCells);
+  // Keep the logical order on one line when possible; on narrower terminals,
+  // wrap only at the explicit source separators so Forecast isn't truncated
+  // just because it follows the real account credits and reset history.
+  const sections = Bun.stringWidth(coloredLine) <= maxContentCells
+    ? [coloredLine]
+    : coloredLine.split("  │  ").map((part, index) => index ? "│ " + part : part);
+  const headerRows=sections.map(part => fitAnsi(part, maxContentCells));
 
   // Both bars always represent the same *remaining* fraction as the figures
   // above. Filled portion = remaining; muted track = used.
@@ -240,7 +247,7 @@ export function frameRemaining(
     return fitAnsi(colored + empty + percentAndReset, maxContentCells);
   });
 
-  const content = [line, ...barRows];
+  const content = [...headerRows, ...barRows];
   const innerWidth = Math.max(...content.map(row => Bun.stringWidth(row))) + 2;
   const title = "─ Codex Remaining ";
   const topRule = innerWidth >= Bun.stringWidth(title)
@@ -424,7 +431,11 @@ export type UpdatePreferences = {
   quotaWarningPercent: number;
   lastQuotaAlerts: QuotaAlertState;
   tiboEnabled: boolean;
+  tiboAlerts: boolean;
+  lastTiboAlertEvents: { regular?: string; banked?: string };
   tiboCached?: TiboSummary;
+  forecastEnabled: boolean;
+  forecastCached?: ForecastData;
   lastQuotaReport?: Report;
   lastQuotaSuccessAt: number;
 };
@@ -500,6 +511,40 @@ export function parseQuotaSnapshot(value: unknown): Report | undefined {
   };
 }
 
+/** Only announce NEW public events; never replay history on first install. */
+export function parseTiboAlertMarkers(input: unknown): {regular?: string; banked?: string} {
+  const r=input && typeof input==="object" && !Array.isArray(input) ? input as Record<string,unknown> : {};
+  const result: {regular?:string;banked?:string}={};
+  for(const kind of ["regular","banked"] as const) {
+    const value=r[kind];
+    if(typeof value==="string" && Number.isFinite(Date.parse(value))) result[kind]=value;
+  }
+  return result;
+}
+export function calculateTiboNotifications(
+  previous: {regular?:string;banked?:string},
+  fresh: TiboSummary,
+): {next:{regular?:string;banked?:string}; announcements:string[]} {
+  const next={...previous};
+  const announcements:string[]=[];
+  if(fresh.stale) return {next,announcements};
+  for(const kind of ["regular","banked"] as const) {
+    const event=fresh[kind];
+    if(!event) continue;
+    const timestamp=event.announcedAt;
+    if(!Number.isFinite(Date.parse(timestamp))) continue;
+    if(!next[kind] || Date.parse(timestamp)>Date.parse(next[kind])) {
+      if(next[kind]) announcements.push(
+        (kind==="banked"?"New banked reset-credit announcement":"New regular reset announcement")+
+        " · "+timestamp.slice(0,10)+(event.url ? " · "+event.url : "")+
+        " · community source, not per-account confirmation"
+      );
+      next[kind]=timestamp;
+    }
+  }
+  return {next,announcements};
+}
+
 export function parseUpdatePreferences(input: unknown): UpdatePreferences {
   const record = input && typeof input === "object" && !Array.isArray(input)
     ? input as Record<string, unknown>
@@ -533,6 +578,10 @@ export function parseUpdatePreferences(input: unknown): UpdatePreferences {
       ? warning : 20,
     lastQuotaAlerts,
     tiboEnabled: typeof record.tiboEnabled === "boolean" ? record.tiboEnabled : true,
+    tiboAlerts: typeof record.tiboAlerts === "boolean" ? record.tiboAlerts : true,
+    lastTiboAlertEvents: parseTiboAlertMarkers(record.lastTiboAlertEvents),
+    forecastEnabled: typeof record.forecastEnabled === "boolean" ? record.forecastEnabled : true,
+    forecastCached: parseForecastCache(record.forecastCached),
     tiboCached: parseTiboCache(record.tiboCached),
     lastQuotaReport: parseQuotaSnapshot(record.lastQuotaReport),
     lastQuotaSuccessAt: typeof record.lastQuotaSuccessAt === "number" &&
@@ -633,10 +682,29 @@ const TIBO_ACTIONS = [
   { label: "on", description: "Show Tibo reset announcements after your account credits" },
   { label: "off", description: "Hide Tibo and stop fetching community announcements" },
   { label: "refresh", description: "Recheck regular and banked reset announcements now" },
+  { label: "forecast", description: "One-source reset forecast: view / on / off / refresh" },
+  { label: "alerts", description: "Enable or disable new Tibo reset announcements" },
+] as const;
+const TIBO_FORECAST_ACTIONS = [
+  {label:"on",description:"Show experimental forecast in widget"},
+  {label:"off",description:"Hide forecast (details command still works)"},
+  {label:"refresh",description:"Fetch forecast from codex-reset.com now"},
+] as const;
+const TIBO_ALERT_ACTIONS = [
+  {label:"on",description:"Notify on NEW regular and banked announcements"},
+  {label:"off",description:"Disable Tibo announcement notifications"},
 ] as const;
 
 /** Complete arguments after an existing command, including nested alert settings. */
 export function subcommandCompletions(argumentPrefix: string) {
+  const tiboNested = /^tibo +(forecast|alerts) +([a-z]*)$/i.exec(argumentPrefix);
+  if(tiboNested){
+    const name=tiboNested[1]!.toLowerCase();
+    const list=name==="forecast" ? TIBO_FORECAST_ACTIONS : TIBO_ALERT_ACTIONS;
+    const matches=list.filter(item=>item.label.startsWith(tiboNested[2]!.toLowerCase()));
+    return matches.length ? matches.map(item=>({label:item.label,
+      value:"tibo "+name+" "+item.label+" ",description:item.description})) : null;
+  }
   const threshold = /^alerts +threshold +([0-9]*)$/i.exec(argumentPrefix);
   if (threshold) {
     const matches = ALERT_THRESHOLD_PRESETS.filter(value => String(value).startsWith(threshold[1]!));
@@ -676,7 +744,7 @@ export function withCodexRemainingTab(current: AutocompleteProvider): Autocomple
   // This uses the editor's own chaining behavior for Tab and Right;
   // no keybinding interception or OMP source modification is needed.
   const expandable = (label: string, value: string) =>
-    (label === "updates" || label === "alerts" || label === "tibo" || label === "threshold") ? value.trimEnd() + "/" : value;
+    (label === "updates" || label === "alerts" || label === "tibo" || label === "forecast" || label === "threshold") ? value.trimEnd() + "/" : value;
   const matches = SUBCOMMANDS.map(item => ({
     label: item.label,
     value: expandable(item.label, "codex-remaining " + item.label),
@@ -712,6 +780,7 @@ export function withCodexRemainingTab(current: AutocompleteProvider): Autocomple
       const isOwnExpandable = (
         marker === "codex-remaining updates/" || marker === "codex-remaining alerts/" || marker === "codex-remaining tibo/"
         || marker === "updates/" || marker === "alerts/" || marker === "tibo/" || marker === "alerts threshold/"
+        || marker === "tibo forecast/" || marker === "tibo alerts/"
       );
       if (!isOwnExpandable) return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
 
@@ -759,6 +828,7 @@ export function buildQuotaPresentation(
   warningStyle: (text: string) => string,
   now = Date.now(),
   tiboText?: string,
+  forecastText?: string,
 ): { line?: string; progress: RemainingProgress[] } {
   const report = state.report;
   const quotaLine = report && formatRemainingColored(report, accent, now, success, mode);
@@ -767,7 +837,9 @@ export function buildQuotaPresentation(
   const baseLine = quotaLine
     ? (warning ? quotaLine + " · " + warning : quotaLine)
     : (warning ? "⏱ Codex · " + warning : "⏱ Codex · checking quotas…");
-  const line = tiboText ? baseLine + "  │  " + tiboText : baseLine;
+  const line = baseLine
+    + (tiboText ? "  │  " + tiboText : "")
+    + (forecastText ? "  │  " + forecastText : "");
   const progress = report && mode === "bars"
     ? quotaWindows(report, now)
         .filter(window => window.label === "5h" || window.label === "7d")
@@ -799,6 +871,10 @@ export function helpLines(mode: DisplayMode, updateChecks = true, quotaAlerts = 
     "/codex-remaining tibo         Latest community reset announcements",
     "/codex-remaining tibo on/off  Show or hide Tibo inline status",
     "/codex-remaining tibo refresh Check community announcements now",
+    "/codex-remaining tibo alerts on/off  New reset notifications (default ON)",
+    "/codex-remaining tibo forecast       View 24h/48h model forecast",
+    "/codex-remaining tibo forecast on/off Show or hide forecast in widget",
+    "/codex-remaining tibo forecast refresh Recheck forecast (single API)",
     "",
     "Critical quota threshold: 10% · daily npm checks: 24h",
     "Quota refresh: 5 min · countdown: 30 sec",
@@ -817,6 +893,9 @@ export default function codexRemaining(pi: ExtensionAPI): void {
   let updateInFlight: Promise<boolean> | undefined;
   let lastAlertEvaluatedReport: Report | undefined;
   let tibo: TiboSummary | undefined;
+  let forecast: ForecastState = {status:"loading"};
+  let forecastNextCheckAt = 0;
+  let forecastPending: Promise<boolean> | undefined;
   let tiboNextCheckAt = 0;
   let tiboPending: Promise<boolean> | undefined;
   let persistedQuotaAt = 0;
@@ -878,6 +957,8 @@ export default function codexRemaining(pi: ExtensionAPI): void {
       quotas.seedCached(preferences.lastQuotaReport, preferences.lastQuotaSuccessAt);
     }
     if (!tibo && preferences.tiboCached) tibo = preferences.tiboCached;
+    if (preferences.forecastCached && forecast.status === "loading")
+      forecast = {status:"stale",data:preferences.forecastCached};
   };
 
   const clear = (ctx: ExtensionContext): void => {
@@ -894,6 +975,7 @@ export default function codexRemaining(pi: ExtensionAPI): void {
       text => ctx.ui.theme.fg("warning", text),
       Date.now(),
       preferences.tiboEnabled ? tiboInline(tibo, !tibo || Date.now() >= tiboNextCheckAt) : undefined,
+      preferences.tiboEnabled && preferences.forecastEnabled ? forecastInline(forecast) : undefined,
     );
     ctx.ui.setWidget(
       WIDGET_KEY,
@@ -972,6 +1054,37 @@ export default function codexRemaining(pi: ExtensionAPI): void {
     return ok;
   };
 
+  // One model, one endpoint, no forecast fallback or blended probabilities.
+  const refreshForecast = async (ctx: ExtensionContext, force = false): Promise<boolean> => {
+    if (!sessionActive || ctx.mode !== "tui" || ctx.agent.kind !== "main") return false;
+    if (!force && (!preferences.tiboEnabled || !preferences.forecastEnabled)) return false;
+    if (forecastPending) return forecastPending;
+    if (!force && Date.now() < forecastNextCheckAt) return false;
+    forecastNextCheckAt = Date.now() + FORECAST_REFRESH_MS;
+    const pending = (async () => {
+      const fresh = await fetchForecast();
+      if (!sessionActive) return false;
+      if (fresh.status === "unavailable") {
+        forecastNextCheckAt = Date.now() + 2 * 60_000;
+        forecast = ("data" in forecast) ? {status:"stale",data:forecast.data} : fresh;
+      } else {
+        forecast = fresh;
+        if ("data" in fresh) {
+          preferences.forecastCached = fresh.data;
+        } else {
+          preferences.forecastCached = undefined; // No forecast != stale forecast
+        }
+        void savePreferences().catch(() => {});
+      }
+      if ((ctx.models.current() ?? ctx.model)?.provider === "openai-codex") show(ctx);
+      return fresh.status === "estimated" || fresh.status === "no_forecast";
+    })();
+    forecastPending = pending;
+    try { return await pending; } finally {
+      if (forecastPending === pending) forecastPending = undefined;
+    }
+  };
+
   // Tibo never blocks the account widget. Community data uses its own timer.
   const refreshTibo = async (ctx: ExtensionContext, force = false): Promise<boolean> => {
     if (!preferences.tiboEnabled || !sessionActive || ctx.mode !== "tui" || ctx.agent.kind !== "main") return false;
@@ -985,7 +1098,19 @@ export default function codexRemaining(pi: ExtensionAPI): void {
         if (!preferences.tiboEnabled || !sessionActive) return false;
         tibo = fresh;
         preferences.tiboCached = fresh;
-        void savePreferences().catch(() => {});
+        // Advance markers even when notifications are turned off, so enabling
+        // them later cannot replay old events. First run establishes a baseline.
+        const result=calculateTiboNotifications(preferences.lastTiboAlertEvents,fresh);
+        preferences.lastTiboAlertEvents=result.next;
+        try {
+          await savePreferences(); // dedup survives restart before notifying
+          if (preferences.tiboAlerts && sessionActive) {
+            for (const note of result.announcements) {
+              if (!sessionActive || !preferences.tiboAlerts) break;
+              ctx.ui.notify("Tibo · "+note,"info");
+            }
+          }
+        } catch { /* Failed persistence must not block the widget. */ }
         if ((ctx.models.current() ?? ctx.model)?.provider === "openai-codex") show(ctx);
         return true;
       } catch {
@@ -1070,6 +1195,7 @@ export default function codexRemaining(pi: ExtensionAPI): void {
     ctx.setInterval(() => {
       void refresh(ctx);
       void refreshTibo(ctx);
+      void refreshForecast(ctx);
       void checkForUpdates(ctx);
     }, TICK_MS);
 
@@ -1081,6 +1207,7 @@ export default function codexRemaining(pi: ExtensionAPI): void {
       // Expensive checks happen independently after the editor is ready.
       void refresh(ctx);
       void refreshTibo(ctx);
+      void refreshForecast(ctx);
       void checkForUpdates(ctx);
       void prepareNativeLayout(ctx).then(() => {
         if (sessionActive && !nativeLayoutReady) clear(ctx);
@@ -1131,7 +1258,7 @@ export default function codexRemaining(pi: ExtensionAPI): void {
   };
 
   pi.registerCommand("codex-remaining", {
-    description: "Codex quotas, alerts & Tibo; compact | bars | refresh | updates | alerts | tibo | help",
+    description: "Codex quotas, alerts, reset history & forecast; compact | bars | refresh | updates | alerts | tibo | help",
     getArgumentCompletions: subcommandCompletions,
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
@@ -1167,6 +1294,30 @@ export default function codexRemaining(pi: ExtensionAPI): void {
         }
       } else if (arg === "updates check") {
         await checkForUpdates(ctx, true);
+      } else if (arg === "tibo forecast") {
+        ctx.ui.notify(forecastDetails(forecast), "info");
+      } else if (arg === "tibo forecast on" || arg === "tibo forecast off") {
+        const enabled = arg === "tibo forecast on";
+        preferences.forecastEnabled = enabled;
+        if (enabled) forecastNextCheckAt = 0;
+        try {
+          await savePreferences();
+          ctx.ui.notify("Tibo forecast display "+(enabled ? "enabled":"disabled")+" (saved).", "info");
+        } catch { ctx.ui.notify("Could not save forecast display setting.", "warning"); }
+        if ((ctx.models.current() ?? ctx.model)?.provider === "openai-codex") show(ctx);
+        if (enabled) void refreshForecast(ctx);
+      } else if (arg === "tibo forecast refresh") {
+        const ok = await refreshForecast(ctx, true);
+        ctx.ui.notify(forecastDetails(forecast)+(!ok ? " · No fresh forecast retrieved." : ""),ok ? "info":"warning");
+      } else if (arg === "tibo alerts") {
+        ctx.ui.notify("Tibo new reset announcements: "+(preferences.tiboAlerts?"on":"off")+". Use: tibo alerts on | off", "info");
+      } else if (arg === "tibo alerts on" || arg === "tibo alerts off") {
+        const enabled=arg==="tibo alerts on";
+        preferences.tiboAlerts=enabled;
+        try {
+          await savePreferences();
+          ctx.ui.notify("Tibo reset notifications "+(enabled?"enabled":"disabled")+" (saved).", "info");
+        } catch { ctx.ui.notify("Could not save Tibo notifications setting.", "warning"); }
       } else if (arg === "tibo") {
         if (!preferences.tiboEnabled) {
           ctx.ui.notify("Tibo community resets are off. Use /codex-remaining tibo on to enable.", "info");
@@ -1177,12 +1328,15 @@ export default function codexRemaining(pi: ExtensionAPI): void {
             ? ` · Upcoming ${tibo.scheduled.type} by ${tibo.scheduled.scheduledFor.slice(0,10)} (not guaranteed)`
             : " · No upcoming confirmed announcement";
           const stale = tibo?.stale ? " [STALE]" : "";
-          ctx.ui.notify(`Tibo (community)${stale}: last regular reset ${regular} · last banked reset ${banked}${scheduled}. Source: https://tibo.cc`, "info");
+          ctx.ui.notify(`Tibo (community)${stale}: last regular reset ${regular} · last banked reset ${banked}${scheduled}. Source: ${tibo?.source ?? "unavailable"}. Official X posts linked in event history; forecast source: https://codex-reset.com/api/forecast`, "info");
         }
       } else if (arg === "tibo on" || arg === "tibo off") {
         const enabled = arg === "tibo on";
         preferences.tiboEnabled = enabled;
-        if (enabled) tiboNextCheckAt = 0;
+        if (enabled) {
+          tiboNextCheckAt = 0;
+          forecastNextCheckAt = 0;
+        }
         try {
           await savePreferences();
           ctx.ui.notify(`Tibo community reset display ${enabled ? "enabled" : "disabled"} (saved).`, "info");
@@ -1190,7 +1344,10 @@ export default function codexRemaining(pi: ExtensionAPI): void {
           ctx.ui.notify("Could not save Tibo setting.", "warning");
         }
         if ((ctx.models.current() ?? ctx.model)?.provider === "openai-codex") show(ctx);
-        if (enabled) void refreshTibo(ctx);
+        if (enabled) {
+          void refreshTibo(ctx);
+          void refreshForecast(ctx);
+        }
       } else if (arg === "tibo refresh") {
         if (!preferences.tiboEnabled) {
           ctx.ui.notify("Enable Tibo first with /codex-remaining tibo on.", "warning");
