@@ -10,7 +10,7 @@ const makeReport = (five: number, seven: number, fiveReset = 2026000000000, seve
   ],
 });
 const prefs = parseUpdatePreferences({mode:"compact",updateChecks:false});
-assert(pkg.version === "0.1.5", "package version");
+assert(pkg.version === "0.1.6", "package version");
 assert(prefs.mode === "compact" && prefs.updateChecks === false, "v0.1.4 preferences migrated");
 assert(prefs.quotaAlerts && prefs.quotaWarningPercent === 20, "alerts default on at 20%");
 assert(Object.keys(prefs.lastQuotaAlerts).length === 0, "first install has no recorded alerts");

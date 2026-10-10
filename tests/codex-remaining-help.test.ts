@@ -69,7 +69,7 @@ assert(notices.length === 0, "help must not trigger quota-refreshed notification
 console.log("PASS bare command and help alias show modal; no force-refresh; 5 terminal widths; Enter/Esc/q close");
 
 await handler!("updates",ctx);
-assert(notices.some(n=>n.includes("npm update checks: on") && n.includes("installed v0.1.5")),
+assert(notices.some(n=>n.includes("npm update checks: on") && n.includes("installed v0.1.6")),
   "updates status reports enabled state and current version");
 await handler!("alerts",ctx);
 assert(notices.some(n=>n.includes("quota alerts: on") && n.includes("warning <=20%")),
@@ -165,3 +165,40 @@ assert(otherForce?.items[0]?.label === "file" && forcedCalls === 1,
 assert(!tabAfterSpace.shouldTriggerFileCompletion!(["/help foo "], 0, 10),
   "unrelated Tab guard remains unchanged");
 console.log("PASS real OMP nested-Tab routing after update/alert selection, forced completion, and delegation");
+
+/**
+ * OMP 18.8.8 chains after acceptance when the original suggestion value ends
+ * with a directory separator. The wrapper must keep that marker out of the
+ * real command text, for both bare and argument completions.
+ */
+const chainedRoot = wrapped.trySyncSlashCompletion!("/codex-remaining")!;
+for (const name of ["updates", "alerts"]) {
+  const item = chainedRoot.items.find(i => i.label === name)!;
+  assert(item.value.endsWith("/"), name + " opts into OMP native chaining");
+  const applied = wrapped.applyCompletion(["/codex-remaining"], 0, 16, item, chainedRoot.prefix);
+  assert(applied.lines[0] === "/codex-remaining " + name + " ",
+    "root " + name + " completes as valid slash command without marker");
+}
+for (const [typed, expectedLabel, expectedResult, expectedNext] of [
+  ["/codex-remaining up", "updates", "/codex-remaining updates ", "on"],
+  ["/codex-remaining al", "alerts", "/codex-remaining alerts ", "on"],
+  ["/codex-remaining alerts th", "threshold", "/codex-remaining alerts threshold ", "10"],
+  ["/codex-remaining ", "updates", "/codex-remaining updates ", "on"],
+] as const) {
+  const found = await wrapped.getSuggestions([typed],0,typed.length);
+  const item = found?.items.find(i => i.label === expectedLabel)!;
+  assert(!!item && item.value.endsWith("/"), expectedLabel + " is a chainable node");
+  const applied = wrapped.applyCompletion([typed],0,typed.length,item,found!.prefix);
+  assert(applied.lines[0] === expectedResult, expectedLabel + " inserts no fake directory marker");
+  const submenu = await wrapped.getSuggestions([applied.lines[0]], 0, expectedResult.length);
+  assert(submenu?.items[0]?.label === expectedNext, expectedLabel + " leads to expected submenu");
+}
+for(const leaf of ["on","off","check"]) {
+  const typed="/codex-remaining updates ";
+  const found=await wrapped.getSuggestions([typed],0,typed.length);
+  const item=found?.items.find(i=>i.label===leaf)!;
+  assert(!item.value.endsWith("/"), leaf + " remains leaf");
+  const applied=wrapped.applyCompletion([typed],0,typed.length,item,found!.prefix);
+  assert(applied.lines[0] === typed+leaf+" ", leaf + " inserts correct executable command");
+}
+console.log("PASS 18.8.8 native Right/Tab chaining markers, cleaned values, submenus and leaf commands");

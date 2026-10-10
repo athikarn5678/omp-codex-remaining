@@ -18,7 +18,7 @@ const STATUS_KEY = "codex-remaining"; // clear legacy status from the prior vers
 const REFRESH_MS = 5 * 60_000;
 const TICK_MS = 30_000;
 const ANSI_DEFAULT_FG = "\x1b[39m";
-export const EXTENSION_VERSION = "0.1.5";
+export const EXTENSION_VERSION = "0.1.6";
 const UPDATE_CHECK_MS = 24 * 60 * 60_000;
 const NPM_LATEST_URL = "https://registry.npmjs.org/omp-codex-remaining/latest";
 export type DisplayMode = "compact" | "bars";
@@ -607,9 +607,16 @@ export function subcommandCompletions(argumentPrefix: string) {
  * subcommands without requiring an extra space. Delegate everything else.
  */
 export function withCodexRemainingTab(current: AutocompleteProvider): AutocompleteProvider {
+  // OMP 18.8.8 automatically reopens autocomplete after accepting a
+  // "directory" (value ending with /). Mark only our expandable command
+  // nodes this way, then remove the marker before editing the real input.
+  // This uses the editor's own chaining behavior for Tab and Right;
+  // no keybinding interception or OMP source modification is needed.
+  const expandable = (label: string, value: string) =>
+    (label === "updates" || label === "alerts" || label === "threshold") ? value.trimEnd() + "/" : value;
   const matches = SUBCOMMANDS.map(item => ({
     label: item.label,
-    value: "codex-remaining " + item.label,
+    value: expandable(item.label, "codex-remaining " + item.label),
     description: item.description,
   }));
   const completeBareCommand = (text: string) =>
@@ -620,7 +627,12 @@ export function withCodexRemainingTab(current: AutocompleteProvider): Autocomple
     if (!text.startsWith(COMMAND_PREFIX + " ")) return null;
     const argumentText = text.slice(COMMAND_PREFIX.length + 1);
     const suggestions = subcommandCompletions(argumentText);
-    return suggestions?.length ? { items: suggestions, prefix: argumentText } : null;
+    return suggestions?.length
+      ? { items: suggestions.map(item => ({
+          ...item,
+          value: expandable(item.label, item.value),
+        })), prefix: argumentText }
+      : null;
   };
 
   return {
@@ -632,8 +644,22 @@ export function withCodexRemainingTab(current: AutocompleteProvider): Autocomple
         ?? completeOwnArguments(lines, cursorLine, cursorCol)
         ?? current.getSuggestions(lines, cursorLine, cursorCol, signal, onPartial);
     },
-    applyCompletion: (lines, cursorLine, cursorCol, item, prefix) =>
-      current.applyCompletion(lines, cursorLine, cursorCol, item, prefix),
+    applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
+      const marker = item.value;
+      const isOwnExpandable = (
+        marker === "codex-remaining updates/" || marker === "codex-remaining alerts/"
+        || marker === "updates/" || marker === "alerts/" || marker === "alerts threshold/"
+      );
+      if (!isOwnExpandable) return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+
+      const bareCommand = prefix === COMMAND_PREFIX;
+      // Bare slash command completion adds the trailing space itself;
+      // argument completion needs the trailing space explicitly.
+      const normalizedValue = marker.slice(0, -1) + (bareCommand ? "" : " ");
+      return current.applyCompletion(
+        lines, cursorLine, cursorCol, { ...item, value: normalizedValue }, prefix,
+      );
+    },
     trySyncSlashCompletion: text =>
       completeBareCommand(text) ?? current.trySyncSlashCompletion?.(text) ?? null,
     ...(current.getInlineHint && {

@@ -1,6 +1,6 @@
 {
   "name": "omp-codex-remaining",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Display remaining OpenAI Codex quotas in Oh My Pi with compact and progress-bar layouts",
   "type": "module",
   "license": "MIT",

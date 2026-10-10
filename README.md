@@ -9,13 +9,14 @@ An unofficial **Oh My Pi (OMP)** extension showing **remaining OpenAI Codex quot
 - Five colors: 0–20% red, 21–40% orange, 41–60% yellow, 61–80% lime, 81–100% green.
 - Automatically refreshes usage every 5 minutes, countdowns every 30 seconds; retries failures after 1 minute and marks cached data as stale.
 - Tab completion for every command, with descriptive options; remembers the selected layout.
+- **Native Right Arrow chaining (v0.1.6):** choosing `updates`, `alerts`, or `alerts threshold` opens its nested menu automatically in OMP 18.8.8, without pressing Tab again.
 - **Update notifications (v0.1.4+):** checks public npm metadata at most once per 24 hours, notifies once per new version, never auto-upgrades. Can be disabled.
 - **Low quota alerts (v0.1.5):** alerts when Codex 5h or 7d remaining quota falls to 20% (warning) or 10% (critical). Each alert level is shown only once per reset window; choose a warning threshold or disable alerts.
 - Uses local `omp usage` (no separate API key).
 
 ## Requirements
 
-**OMP 18.8.7+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Verified locally on Windows OMP 18.8.7; the GitHub Actions matrix is configured for Windows, macOS, and Linux, but passing CI does not replace real TUI testing on each OS.
+**OMP 18.8.7+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Verified locally on Windows OMP 18.8.8 (including Editor key handling for Tab/Right Arrow); the GitHub Actions matrix is configured for Windows, macOS, and Linux, but passing CI does not replace real TUI testing on each OS.
 
 ## Install
 
@@ -72,7 +73,7 @@ Restart OMP afterward. The saved layout preference is stored separately in `code
 
 The Help screen lists the commands, current layout and automatic refresh schedule. Close it with **Enter**, **Esc** or **q**. Opening Help does not fetch new quota data.
 
-**Tab autocomplete:** Type `/codex-remaining` and press **Tab** to open all seven subcommands (`help`, `compact`, `bars`, `toggle`, `refresh`, `updates`, `alerts`) with a description beside each option. Select a command from the list and press Enter to run it. Autocomplete also works after a space, for example `/codex-remaining ` + Tab, and filters as you type (e.g. `/codex-remaining re` + Tab). **v0.1.5 fixes nested Tab:** after selecting `updates` and pressing Tab again, you get `on`, `off`, `check`. After selecting `alerts`, Tab shows `on`, `off`, `threshold`; selecting `threshold` shows common percentage presets. You can also type a custom integer from 10 to 90.
+**Tab autocomplete:** Type `/codex-remaining` and press **Tab** to open all seven subcommands (`help`, `compact`, `bars`, `toggle`, `refresh`, `updates`, `alerts`) with a description beside each option. Select a command from the list and press Enter to run it. Autocomplete also works after a space, for example `/codex-remaining ` + Tab, and filters as you type (e.g. `/codex-remaining re` + Tab). **v0.1.6 nested menus:** On OMP 18.8.8, selecting `updates` using **Right Arrow or Tab** automatically opens `on`, `off`, `check` without an extra Tab. Selecting `alerts` automatically opens `on`, `off`, `threshold`; selecting `threshold` opens common percentage presets. The right arrow accepts a popup selection only when the caret is at the end of the input; otherwise it moves the caret normally. You can also type a custom integer from 10 to 90.
 
 Layout, npm update checks, and low-quota alerts are saved automatically to `codex-remaining-settings.json` under the directory returned by `omp config path`.
 
@@ -99,7 +100,7 @@ If you want the Codex Remaining widget instead, explicitly inspect `omp config g
 
 ## Testing
 
-With Bun installed, run `bun run test` from this repository to check Help/Autocomplete, quota rendering, refresh failures/retries, read-only configuration behavior, update settings migration, version comparison, npm failure handling, nested Tab routing through OMP's forced-completion path, and quota alert thresholds/duplication/recovery. Run `bun run build:check` to validate the bundle, and `npm pack --dry-run` to validate package contents. GitHub Actions runs these checks on Windows, macOS, and Linux. Tests are included in GitHub but excluded from the published npm tarball.
+With Bun installed, run `bun run test` from this repository to check Help/Autocomplete, quota rendering, refresh failures/retries, read-only configuration behavior, update settings migration, version comparison, npm failure handling, nested Tab routing through OMP's forced-completion path, Right Arrow chaining-marker handling, and quota alert thresholds/duplication/recovery. Run `bun run build:check` to validate the bundle, and `npm pack --dry-run` to validate package contents. GitHub Actions runs these checks on Windows, macOS, and Linux. Tests are included in GitHub but excluded from the published npm tarball.
 
 ## License
 
