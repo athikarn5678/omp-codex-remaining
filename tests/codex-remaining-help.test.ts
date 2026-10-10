@@ -43,11 +43,11 @@ const ctx: any = {
   },
 };
 const commands = helpLines("bars").join("\n");
-for(const s of ["/codex-remaining             Show this help","/codex-remaining help","/codex-remaining compact","/codex-remaining bars","/codex-remaining toggle","/codex-remaining refresh","/codex-remaining updates","/codex-remaining updates on","/codex-remaining updates off","/codex-remaining updates check"]) {
+for(const s of ["/codex-remaining              Show this help","/codex-remaining help","/codex-remaining compact","/codex-remaining bars","/codex-remaining toggle","/codex-remaining refresh","/codex-remaining updates","/codex-remaining updates on","/codex-remaining updates off","/codex-remaining updates check"]) {
   assert(commands.includes(s), "missing command in help: "+s);
 }
-assert(commands.includes("Current layout: bars"), "must describe active mode");
-const allCommands = ["help", "compact", "bars", "toggle", "refresh", "updates"];
+assert(commands.includes("Layout: bars"), "must describe active mode");
+const allCommands = ["help", "compact", "bars", "toggle", "refresh", "updates", "alerts"];
 const completeAtSpace = completer!("");
 assert(completeAtSpace?.map(x => x.label).join(",") === allCommands.join(","), "Tab must list all subcommands");
 assert(completeAtSpace.every((x: any) => typeof x.description === "string" && x.description.length > 10),
@@ -58,7 +58,7 @@ assert(completer!("unknown") === null, "no unrelated matches");
 assert(completer!("bars ") === null, "no unrelated nested completions");
 assert(completer!("updates ")?.map(x => x.label).join(",") === "on,off,check", "nested update actions");
 assert(completer!("updates c")?.map(x => x.label).join(",") === "check", "nested update filtering");
-console.log("PASS Tab completions and descriptions for all six subcommands plus update actions");
+console.log("PASS Tab completions and descriptions for all seven subcommands and nested actions");
 
 await handler!("",ctx);
 await handler!("help",ctx);
@@ -69,9 +69,15 @@ assert(notices.length === 0, "help must not trigger quota-refreshed notification
 console.log("PASS bare command and help alias show modal; no force-refresh; 5 terminal widths; Enter/Esc/q close");
 
 await handler!("updates",ctx);
-assert(notices.some(n=>n.includes("npm update checks: on") && n.includes("installed v0.1.4")),
+assert(notices.some(n=>n.includes("npm update checks: on") && n.includes("installed v0.1.5")),
   "updates status reports enabled state and current version");
-assert(modelReads === 0, "updates status must not invoke Codex quota");
+await handler!("alerts",ctx);
+assert(notices.some(n=>n.includes("quota alerts: on") && n.includes("warning <=20%")),
+  "alerts status reports initial warning and critical settings");
+await handler!("alerts threshold 5",ctx);
+assert(notices.some(n=>n.includes("between 10 and 90 percent")),
+  "invalid alert thresholds rejected");
+assert(modelReads === 0, "settings/status must not invoke Codex quota");
 await handler!("refresh",ctx);
 assert(modelReads === 1, "refresh must access model");
 assert(notices.some(n=>n.includes("failed or unavailable")), "do not report a successful refresh when Codex is not active");
@@ -101,7 +107,7 @@ const baseProvider: any = {
 };
 const wrapped = withCodexRemainingTab(baseProvider);
 const noSpace = wrapped.trySyncSlashCompletion!("/codex-remaining");
-assert(noSpace?.items.map(item => item.label).join(",") === allCommands.join(","), "bare Tab lists six options");
+assert(noSpace?.items.map(item => item.label).join(",") === allCommands.join(","), "bare Tab lists seven options");
 assert(noSpace?.items.every(item => item.description && item.description.length > 10), "bare Tab shows right-side descriptions");
 assert(noSpace?.prefix === "/codex-remaining", "bare Tab preserves slash prefix");
 for (const item of noSpace!.items) {
@@ -109,7 +115,7 @@ for (const item of noSpace!.items) {
   assert(applied.lines[0] === "/codex-remaining " + item.label + " ", "Tab selection inserts " + item.label);
 }
 const fullList = await wrapped.getSuggestions(["/codex-remaining"], 0, 16);
-assert(fullList?.items.length === 6, "async completion also lists all six commands");
+assert(fullList?.items.length === 7, "async completion also lists all seven commands");
 assert(baseCalls.length === 0, "exact command must not fall through to OMP default suggestions");
 const unrelated = await wrapped.getSuggestions(["/help"], 0, 5);
 assert(unrelated?.items[0]?.label === "other", "unrelated commands delegate to default suggestions");
@@ -117,3 +123,45 @@ const unrelatedSync = wrapped.trySyncSlashCompletion!("/modelpreset");
 assert(unrelatedSync?.items[0]?.label === "base", "unrelated command Tab delegates");
 assert(!("getForceFileSuggestions" in wrapped), "do not accidentally add file-completion functionality");
 console.log("PASS bare Tab, per-item right-side descriptions, insertion, and fallback to normal OMP autocomplete");
+
+// OMP 18.8.7 routes Tab after a space through force-file completion when
+// its provider exposes that API. Verify nested slash options still win.
+let forcedCalls = 0;
+const tabAfterSpace = withCodexRemainingTab({
+  ...baseProvider,
+  shouldTriggerFileCompletion: () => false,
+  getForceFileSuggestions: async () => {
+    forcedCalls++;
+    return { items: [{ label: "file", value: "file" }], prefix: "file" };
+  },
+});
+const firstPopup = tabAfterSpace.trySyncSlashCompletion!("/codex-remaining")!;
+const updatesItem = firstPopup.items.find(item => item.label === "updates")!;
+const updatesText = tabAfterSpace.applyCompletion(["/codex-remaining"], 0, 16, updatesItem, firstPopup.prefix).lines[0]!;
+assert(updatesText === "/codex-remaining updates ", "selecting updates inserts correct command and space");
+const nested = await tabAfterSpace.getSuggestions([updatesText], 0, updatesText.length);
+assert(nested?.items.map(item => item.label).join(",") === "on,off,check",
+  "selecting updates opens on/off/check");
+assert(tabAfterSpace.shouldTriggerFileCompletion!([updatesText], 0, updatesText.length),
+  "OMP's explicit-Tab gate allows nested options, even if base provider rejects");
+const forcedNested = await tabAfterSpace.getForceFileSuggestions!([updatesText], 0, updatesText.length);
+assert(forcedNested?.items.map(item => item.label).join(",") === "on,off,check",
+  "forced Tab chooses update options over file suggestions");
+assert(forcedCalls === 0, "nested update Tab does not trigger file completion");
+for (const item of forcedNested!.items) {
+  const inserted = tabAfterSpace.applyCompletion([updatesText], 0, updatesText.length, item, forcedNested!.prefix);
+  assert(inserted.lines[0]?.trim() === "/codex-remaining updates " + item.label,
+    "nested action inserted correctly: " + item.label);
+}
+const alertText = "/codex-remaining alerts ";
+assert((await tabAfterSpace.getForceFileSuggestions!([alertText],0,alertText.length))?.items.map(x => x.label).join(",") === "on,off,threshold",
+  "alerts has its own nested menu");
+const thresholdText = "/codex-remaining alerts threshold ";
+assert((await tabAfterSpace.getForceFileSuggestions!([thresholdText],0,thresholdText.length))?.items.length === 6,
+  "threshold values complete at a third level");
+const otherForce = await tabAfterSpace.getForceFileSuggestions!(["/help foo "], 0, 10);
+assert(otherForce?.items[0]?.label === "file" && forcedCalls === 1,
+  "unrelated commands still delegate forced completion");
+assert(!tabAfterSpace.shouldTriggerFileCompletion!(["/help foo "], 0, 10),
+  "unrelated Tab guard remains unchanged");
+console.log("PASS real OMP nested-Tab routing after update/alert selection, forced completion, and delegation");

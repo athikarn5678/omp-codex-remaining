@@ -18,7 +18,7 @@ const STATUS_KEY = "codex-remaining"; // clear legacy status from the prior vers
 const REFRESH_MS = 5 * 60_000;
 const TICK_MS = 30_000;
 const ANSI_DEFAULT_FG = "\x1b[39m";
-export const EXTENSION_VERSION = "0.1.4";
+export const EXTENSION_VERSION = "0.1.5";
 const UPDATE_CHECK_MS = 24 * 60 * 60_000;
 const NPM_LATEST_URL = "https://registry.npmjs.org/omp-codex-remaining/latest";
 export type DisplayMode = "compact" | "bars";
@@ -402,11 +402,16 @@ export function quotaAvailabilityNote(state: QuotaPollState, now = Date.now()): 
   return `⚠ stale quota · updated ${age} ago`;
 }
 
+export type QuotaAlertLevel = "warning" | "critical";
+export type QuotaAlertState = Record<string, { level: QuotaAlertLevel; resetAt?: number }>;
 export type UpdatePreferences = {
   mode: DisplayMode;
   updateChecks: boolean;
   lastUpdateCheckAt: number;
   lastNotifiedVersion?: string;
+  quotaAlerts: boolean;
+  quotaWarningPercent: number;
+  lastQuotaAlerts: QuotaAlertState;
 };
 
 type Version = { major: number; minor: number; patch: number; prerelease?: string[] };
@@ -450,12 +455,79 @@ export function parseUpdatePreferences(input: unknown): UpdatePreferences {
     : {};
   const timestamp = record.lastUpdateCheckAt;
   const version = record.lastNotifiedVersion;
+  const warning = record.quotaWarningPercent;
+  const savedAlerts = record.lastQuotaAlerts;
+  const lastQuotaAlerts: QuotaAlertState = Object.create(null);
+  if (savedAlerts && typeof savedAlerts === "object" && !Array.isArray(savedAlerts)) {
+    for (const label of ["5h", "7d"]) {
+      const item = (savedAlerts as Record<string, unknown>)[label];
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const state = item as Record<string, unknown>;
+      if (state.level !== "warning" && state.level !== "critical") continue;
+      const resetAt = state.resetAt;
+      if (resetAt !== undefined && (typeof resetAt !== "number" || !Number.isFinite(resetAt))) continue;
+      lastQuotaAlerts[label] = {
+        level: state.level,
+        ...(typeof resetAt === "number" ? { resetAt } : {}),
+      };
+    }
+  }
   return {
     mode: parseDisplayMode(record.mode),
     updateChecks: typeof record.updateChecks === "boolean" ? record.updateChecks : true,
     lastUpdateCheckAt: typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp >= 0 ? timestamp : 0,
     lastNotifiedVersion: typeof version === "string" && parseVersion(version) ? version : undefined,
+    quotaAlerts: typeof record.quotaAlerts === "boolean" ? record.quotaAlerts : true,
+    quotaWarningPercent: typeof warning === "number" && Number.isInteger(warning) && warning >= 10 && warning <= 90
+      ? warning : 20,
+    lastQuotaAlerts,
   };
+}
+
+export type QuotaAlertEvent = { window: "5h" | "7d"; pct: number; level: QuotaAlertLevel };
+
+/**
+ * Generate at most one warning and one critical alert per window/reset.
+ * Recoveries clear the previous level. State is persisted before notification
+ * so restarting OMP does not repeat the same low-quota message.
+ */
+export function evaluateQuotaAlerts(
+  report: Report,
+  preferences: Pick<UpdatePreferences, "quotaAlerts" | "quotaWarningPercent" | "lastQuotaAlerts">,
+  now = Date.now(),
+): { events: QuotaAlertEvent[]; next: QuotaAlertState; changed: boolean } {
+  const next: QuotaAlertState = { ...preferences.lastQuotaAlerts };
+  const events: QuotaAlertEvent[] = [];
+  if (!preferences.quotaAlerts || report.provider !== "openai-codex") {
+    return { events, next, changed: false };
+  }
+  let changed = false;
+  for (const window of quotaWindows(report, now)) {
+    if (window.label !== "5h" && window.label !== "7d") continue;
+    const id = window.label;
+    const prior = next[id];
+    const sameReset = prior?.resetAt === window.resetAt;
+    const level: QuotaAlertLevel | undefined = window.pct <= 10
+      ? "critical"
+      : window.pct <= preferences.quotaWarningPercent ? "warning" : undefined;
+    if (!level) {
+      if (prior) { delete next[id]; changed = true; }
+      continue;
+    }
+    const shouldNotify = !prior || !sameReset || (level === "critical" && prior.level === "warning");
+    if (shouldNotify) {
+      next[id] = { level, ...(window.resetAt !== undefined ? { resetAt: window.resetAt } : {}) };
+      events.push({ window: id, pct: window.pct, level });
+      changed = true;
+    }
+  }
+  return { events, next, changed };
+}
+
+export function formatQuotaAlert(event: QuotaAlertEvent, threshold: number): string {
+  return event.level === "critical"
+    ? `Codex ${event.window} critically low: ${event.pct}% remaining (10% or less).`
+    : `Codex ${event.window} low: ${event.pct}% remaining (warning threshold ${threshold}%).`;
 }
 
 /** Persisted timestamps avoid repeated npm checks across OMP restarts. */
@@ -486,20 +558,39 @@ const SUBCOMMANDS = [
   { label: "toggle", description: "Switch between compact and bars" },
   { label: "refresh", description: "Force-refresh Codex usage now" },
   { label: "updates", description: "Configure and check npm update notifications" },
+  { label: "alerts", description: "Configure low Codex quota warnings" },
 ] as const;
 const UPDATE_ACTIONS = [
   { label: "on", description: "Enable daily npm update notifications" },
   { label: "off", description: "Disable automatic npm update checks" },
   { label: "check", description: "Check npm for an update right now" },
 ] as const;
+const ALERT_ACTIONS = [
+  { label: "on", description: "Enable low-quota alerts for 5h and 7d" },
+  { label: "off", description: "Disable low-quota alerts" },
+  { label: "threshold", description: "Set warning threshold (10-90%, critical fixed at 10%)" },
+] as const;
+const ALERT_THRESHOLD_PRESETS = [10, 15, 20, 25, 30, 50] as const;
 
-/** Complete both top-level and /codex-remaining updates subcommands. */
+/** Complete arguments after an existing command, including nested alert settings. */
 export function subcommandCompletions(argumentPrefix: string) {
-  const nested = /^updates +([a-z]*)$/i.exec(argumentPrefix);
-  if (nested) {
-    const matches = UPDATE_ACTIONS.filter(item => item.label.startsWith(nested[1]!.toLowerCase()));
+  const threshold = /^alerts +threshold +([0-9]*)$/i.exec(argumentPrefix);
+  if (threshold) {
+    const matches = ALERT_THRESHOLD_PRESETS.filter(value => String(value).startsWith(threshold[1]!));
     return matches.length
-      ? matches.map(item => ({ label: item.label, value: "updates " + item.label + " ", description: item.description }))
+      ? matches.map(value => ({
+          label: String(value), value: "alerts threshold " + value + " ",
+          description: "Warn at " + value + "% remaining (critical at 10%)",
+        }))
+      : null;
+  }
+  const nested = /^(updates|alerts) +([a-z]*)$/i.exec(argumentPrefix);
+  if (nested) {
+    const parent = nested[1]!.toLowerCase();
+    const actions = parent === "updates" ? UPDATE_ACTIONS : ALERT_ACTIONS;
+    const matches = actions.filter(item => item.label.startsWith(nested[2]!.toLowerCase()));
+    return matches.length
+      ? matches.map(item => ({ label: item.label, value: parent + " " + item.label + " ", description: item.description }))
       : null;
   }
   if (argumentPrefix.includes(" ")) return null;
@@ -523,12 +614,23 @@ export function withCodexRemainingTab(current: AutocompleteProvider): Autocomple
   }));
   const completeBareCommand = (text: string) =>
     text === COMMAND_PREFIX ? { items: matches, prefix: text } : null;
+  const completeOwnArguments = (lines: string[], line: number, col: number) => {
+    if (line !== 0 || lines.slice(0, line).some(entry => entry.trim())) return null;
+    const text = lines[line]?.slice(0, col) ?? "";
+    if (!text.startsWith(COMMAND_PREFIX + " ")) return null;
+    const argumentText = text.slice(COMMAND_PREFIX.length + 1);
+    const suggestions = subcommandCompletions(argumentText);
+    return suggestions?.length ? { items: suggestions, prefix: argumentText } : null;
+  };
 
   return {
     async getSuggestions(lines, cursorLine, cursorCol, signal, onPartial) {
+      if (signal?.aborted) return null;
       const text = lines[cursorLine]?.slice(0, cursorCol) ?? "";
       const suggestions = cursorLine === 0 ? completeBareCommand(text) : null;
-      return suggestions ?? current.getSuggestions(lines, cursorLine, cursorCol, signal, onPartial);
+      return suggestions
+        ?? completeOwnArguments(lines, cursorLine, cursorCol)
+        ?? current.getSuggestions(lines, cursorLine, cursorCol, signal, onPartial);
     },
     applyCompletion: (lines, cursorLine, cursorCol, item, prefix) =>
       current.applyCompletion(lines, cursorLine, cursorCol, item, prefix),
@@ -542,12 +644,20 @@ export function withCodexRemainingTab(current: AutocompleteProvider): Autocomple
       trySyncInlineReplace: (text: string) => current.trySyncInlineReplace!(text),
     }),
     ...(current.getForceFileSuggestions && {
-      getForceFileSuggestions: (lines: string[], line: number, col: number, signal?: AbortSignal) =>
-        current.getForceFileSuggestions!(lines, line, col, signal),
+      getForceFileSuggestions: (lines: string[], line: number, col: number, signal?: AbortSignal) => {
+        if (signal?.aborted) return Promise.resolve(null);
+        // OMP routes Tab-after-space to forced file completion. Return our
+        // argument choices there, while keeping other commands untouched.
+        const argumentsOnly = completeOwnArguments(lines, line, col);
+        return argumentsOnly
+          ? Promise.resolve(argumentsOnly)
+          : current.getForceFileSuggestions!(lines, line, col, signal);
+      },
     }),
     ...(current.shouldTriggerFileCompletion && {
       shouldTriggerFileCompletion: (lines: string[], line: number, col: number) =>
-        current.shouldTriggerFileCompletion!(lines, line, col),
+        completeOwnArguments(lines, line, col) !== null
+          || current.shouldTriggerFileCompletion!(lines, line, col),
     }),
   };
 }
@@ -576,25 +686,29 @@ export function buildQuotaPresentation(
 }
 
 /** Displayed by the bare slash command and the explicit help alias. */
-export function helpLines(mode: DisplayMode, updateChecks = true): string[] {
+export function helpLines(mode: DisplayMode, updateChecks = true, quotaAlerts = true, threshold = 20): string[] {
   return [
-    `Current layout: ${mode}`,
-    `Update notifications: ${updateChecks ? "on" : "off"} · installed v${EXTENSION_VERSION}`,
+    `Layout: ${mode} · installed v${EXTENSION_VERSION}`,
+    `npm updates: ${updateChecks ? "on" : "off"} · quota alerts: ${quotaAlerts ? `on (${threshold}%)` : "off"}`,
     "",
-    "/codex-remaining             Show this help",
-    "/codex-remaining help        Show this help",
-    "/codex-remaining compact     Single-line quota summary",
-    "/codex-remaining bars        Two quota bars with reset times",
-    "/codex-remaining toggle      Switch between layouts",
-    "/codex-remaining refresh     Force-refresh Codex usage",
-    "/codex-remaining updates     Show update-check settings",
-    "/codex-remaining updates on  Enable daily update checks",
-    "/codex-remaining updates off Disable automatic update checks",
+    "/codex-remaining              Show this help",
+    "/codex-remaining help         Show this help",
+    "/codex-remaining compact      Single-line quota summary",
+    "/codex-remaining bars         Two quota bars",
+    "/codex-remaining toggle       Switch layouts",
+    "/codex-remaining refresh      Refresh Codex usage",
+    "/codex-remaining updates      Show update-check settings",
+    "/codex-remaining updates on   Enable daily update checks",
+    "/codex-remaining updates off  Disable update checks",
     "/codex-remaining updates check Check npm now",
+    "/codex-remaining alerts       Show low-quota alert settings",
+    "/codex-remaining alerts on    Enable alerts for 5h and 7d",
+    "/codex-remaining alerts off   Disable low-quota alerts",
+    "/codex-remaining alerts threshold 20 Set warning % (10-90)",
     "",
+    "Critical quota threshold: 10% · daily npm checks: 24h",
     "Quota refresh: 5 min · countdown: 30 sec",
-    "npm update checks: at most once every 24h",
-    "Tab: type /codex-remaining and press Tab to choose",
+    "Tab: select commands and nested options",
     "Press Enter, Esc or q to close",
   ];
 }
@@ -607,6 +721,7 @@ export default function codexRemaining(pi: ExtensionAPI): void {
   let settingsPath = SETTINGS_PATH;
   let settingsWrite: Promise<void> = Promise.resolve();
   let updateInFlight: Promise<boolean> | undefined;
+  let lastAlertEvaluatedReport: Report | undefined;
   let sessionActive = false;
 
   // Serialize writes so a layout change cannot erase the update-check timestamp.
@@ -703,6 +818,30 @@ export default function codexRemaining(pi: ExtensionAPI): void {
       return false;
     }
     show(ctx);
+    const latest = quotas.getState().report;
+    if (ok && latest && preferences.quotaAlerts && latest !== lastAlertEvaluatedReport) {
+      const result = evaluateQuotaAlerts(latest, preferences);
+      if (result.changed) {
+        const previous = preferences.lastQuotaAlerts;
+        preferences.lastQuotaAlerts = result.next;
+        try {
+          // Record emitted level before notification so restarts cannot spam.
+          await savePreferences();
+          lastAlertEvaluatedReport = latest;
+          if (sessionActive && preferences.quotaAlerts) {
+            for (const event of result.events) {
+              if (!sessionActive || !preferences.quotaAlerts) break;
+              ctx.ui.notify(formatQuotaAlert(event, preferences.quotaWarningPercent), "warning");
+            }
+          }
+        } catch {
+          preferences.lastQuotaAlerts = previous;
+          // Retry on the next refresh. Never break quota display.
+        }
+      } else {
+        lastAlertEvaluatedReport = latest;
+      }
+    }
     return ok;
   };
 
@@ -783,7 +922,7 @@ export default function codexRemaining(pi: ExtensionAPI): void {
   });
 
   const showHelp = async (ctx: ExtensionContext): Promise<void> => {
-    const entries = helpLines(preferences.mode, preferences.updateChecks);
+    const entries = helpLines(preferences.mode, preferences.updateChecks, preferences.quotaAlerts, preferences.quotaWarningPercent);
     await ctx.ui.custom<void>((_tui, theme, _keybindings, done) => ({
       render(width: number) {
         const available = Math.floor(width);
@@ -815,7 +954,7 @@ export default function codexRemaining(pi: ExtensionAPI): void {
   };
 
   pi.registerCommand("codex-remaining", {
-    description: "Codex quota and updates; compact | bars | toggle | refresh | updates | help",
+    description: "Codex quota & alerts; compact | bars | toggle | refresh | updates | alerts | help",
     getArgumentCompletions: subcommandCompletions,
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
@@ -851,6 +990,43 @@ export default function codexRemaining(pi: ExtensionAPI): void {
         }
       } else if (arg === "updates check") {
         await checkForUpdates(ctx, true);
+      } else if (arg === "alerts") {
+        ctx.ui.notify(
+          `Codex Remaining quota alerts: ${preferences.quotaAlerts ? "on" : "off"}, warning <=${preferences.quotaWarningPercent}%, critical <=10%, for 5h and 7d.`,
+          "info",
+        );
+      } else if (arg === "alerts on" || arg === "alerts off") {
+        const enabled = arg === "alerts on";
+        const previous = preferences;
+        preferences = {
+          ...preferences,
+          quotaAlerts: enabled,
+          lastQuotaAlerts: enabled && !previous.quotaAlerts ? {} : previous.lastQuotaAlerts,
+        };
+        try {
+          await savePreferences();
+          ctx.ui.notify(`Codex Remaining quota alerts ${enabled ? "enabled" : "disabled"} (saved).`, "info");
+          if (enabled && !previous.quotaAlerts) lastAlertEvaluatedReport = undefined;
+        } catch {
+          preferences = previous;
+          ctx.ui.notify("Could not save quota-alert preference.", "warning");
+        }
+      } else if (/^alerts threshold +\d+$/.test(arg)) {
+        const threshold = Number(arg.slice("alerts threshold ".length));
+        if (!Number.isInteger(threshold) || threshold < 10 || threshold > 90) {
+          ctx.ui.notify("Quota warning threshold must be between 10 and 90 percent.", "warning");
+        } else {
+          const previous = preferences;
+          preferences = { ...preferences, quotaWarningPercent: threshold, lastQuotaAlerts: {} };
+          try {
+            await savePreferences();
+            lastAlertEvaluatedReport = undefined;
+            ctx.ui.notify(`Codex quota warning threshold set to ${threshold}% (critical remains 10%).`, "info");
+          } catch {
+            preferences = previous;
+            ctx.ui.notify("Could not save quota-alert threshold.", "warning");
+          }
+        }
       } else if (arg === "refresh") {
         const ok = await refresh(ctx, true);
         ctx.ui.notify(
