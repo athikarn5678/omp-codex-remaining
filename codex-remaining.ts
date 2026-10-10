@@ -18,6 +18,9 @@ const STATUS_KEY = "codex-remaining"; // clear legacy status from the prior vers
 const REFRESH_MS = 5 * 60_000;
 const TICK_MS = 30_000;
 const ANSI_DEFAULT_FG = "\x1b[39m";
+export const EXTENSION_VERSION = "0.1.4";
+const UPDATE_CHECK_MS = 24 * 60 * 60_000;
+const NPM_LATEST_URL = "https://registry.npmjs.org/omp-codex-remaining/latest";
 export type DisplayMode = "compact" | "bars";
 const SETTINGS_PATH = join(homedir(), ".omp", "agent", "codex-remaining-settings.json");
 
@@ -399,6 +402,82 @@ export function quotaAvailabilityNote(state: QuotaPollState, now = Date.now()): 
   return `⚠ stale quota · updated ${age} ago`;
 }
 
+export type UpdatePreferences = {
+  mode: DisplayMode;
+  updateChecks: boolean;
+  lastUpdateCheckAt: number;
+  lastNotifiedVersion?: string;
+};
+
+type Version = { major: number; minor: number; patch: number; prerelease?: string[] };
+
+function parseVersion(text: string): Version | undefined {
+  const matched = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$/.exec(text);
+  if (!matched) return undefined;
+  const nums = matched.slice(1, 4).map(Number);
+  if (nums.some(x => !Number.isSafeInteger(x))) return undefined;
+  return { major: nums[0]!, minor: nums[1]!, patch: nums[2]!, prerelease: matched[4]?.split(".") };
+}
+
+/** Compare SemVer without dependencies; ignore build metadata and compare prereleases correctly. */
+export function isNewerVersion(installed: string, latest: string): boolean {
+  const a = parseVersion(installed);
+  const b = parseVersion(latest);
+  if (!a || !b) return false;
+  for (const key of ["major", "minor", "patch"] as const) {
+    if (a[key] !== b[key]) return b[key] > a[key];
+  }
+  if (!a.prerelease) return false; // Stable release outranks any prerelease.
+  if (!b.prerelease) return true;
+  const length = Math.max(a.prerelease.length, b.prerelease.length);
+  for (let i = 0; i < length; i++) {
+    const x = a.prerelease[i];
+    const y = b.prerelease[i];
+    if (x === undefined) return true;
+    if (y === undefined) return false;
+    if (x === y) continue;
+    const xNum = /^\d+$/.test(x), yNum = /^\d+$/.test(y);
+    if (xNum && yNum) return BigInt(y) > BigInt(x);
+    if (xNum !== yNum) return !yNum; // Numeric identifiers have lower precedence.
+    return y > x;
+  }
+  return false;
+}
+
+export function parseUpdatePreferences(input: unknown): UpdatePreferences {
+  const record = input && typeof input === "object" && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : {};
+  const timestamp = record.lastUpdateCheckAt;
+  const version = record.lastNotifiedVersion;
+  return {
+    mode: parseDisplayMode(record.mode),
+    updateChecks: typeof record.updateChecks === "boolean" ? record.updateChecks : true,
+    lastUpdateCheckAt: typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp >= 0 ? timestamp : 0,
+    lastNotifiedVersion: typeof version === "string" && parseVersion(version) ? version : undefined,
+  };
+}
+
+/** Persisted timestamps avoid repeated npm checks across OMP restarts. */
+export function shouldAutoCheckUpdates(settings: UpdatePreferences, now = Date.now()): boolean {
+  return settings.updateChecks
+    && settings.lastUpdateCheckAt <= now
+    && (settings.lastUpdateCheckAt === 0 || now - settings.lastUpdateCheckAt >= UPDATE_CHECK_MS);
+}
+
+/** Only public npm metadata is requested. No user tokens or model usage are transmitted. */
+export async function fetchLatestNpmVersion(request: typeof fetch = fetch): Promise<string | undefined> {
+  const response = await request(NPM_LATEST_URL, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) return undefined;
+  const data = await response.json() as unknown;
+  if (!data || typeof data !== "object" || !("version" in data)) return undefined;
+  const version = (data as { version?: unknown }).version;
+  return typeof version === "string" && parseVersion(version) ? version : undefined;
+}
+
 const COMMAND_PREFIX = "/codex-remaining";
 const SUBCOMMANDS = [
   { label: "help", description: "Show all Codex Remaining commands" },
@@ -406,10 +485,23 @@ const SUBCOMMANDS = [
   { label: "bars", description: "Two quota bars with reset times" },
   { label: "toggle", description: "Switch between compact and bars" },
   { label: "refresh", description: "Force-refresh Codex usage now" },
+  { label: "updates", description: "Configure and check npm update notifications" },
+] as const;
+const UPDATE_ACTIONS = [
+  { label: "on", description: "Enable daily npm update notifications" },
+  { label: "off", description: "Disable automatic npm update checks" },
+  { label: "check", description: "Check npm for an update right now" },
 ] as const;
 
-/** Complete all subcommands when the cursor is after /codex-remaining and a space. */
+/** Complete both top-level and /codex-remaining updates subcommands. */
 export function subcommandCompletions(argumentPrefix: string) {
+  const nested = /^updates +([a-z]*)$/i.exec(argumentPrefix);
+  if (nested) {
+    const matches = UPDATE_ACTIONS.filter(item => item.label.startsWith(nested[1]!.toLowerCase()));
+    return matches.length
+      ? matches.map(item => ({ label: item.label, value: "updates " + item.label + " ", description: item.description }))
+      : null;
+  }
   if (argumentPrefix.includes(" ")) return null;
   const prefix = argumentPrefix.trim().toLowerCase();
   const matching = SUBCOMMANDS.filter(item => item.label.startsWith(prefix));
@@ -484,9 +576,10 @@ export function buildQuotaPresentation(
 }
 
 /** Displayed by the bare slash command and the explicit help alias. */
-export function helpLines(mode: DisplayMode): string[] {
+export function helpLines(mode: DisplayMode, updateChecks = true): string[] {
   return [
     `Current layout: ${mode}`,
+    `Update notifications: ${updateChecks ? "on" : "off"} · installed v${EXTENSION_VERSION}`,
     "",
     "/codex-remaining             Show this help",
     "/codex-remaining help        Show this help",
@@ -494,8 +587,13 @@ export function helpLines(mode: DisplayMode): string[] {
     "/codex-remaining bars        Two quota bars with reset times",
     "/codex-remaining toggle      Switch between layouts",
     "/codex-remaining refresh     Force-refresh Codex usage",
+    "/codex-remaining updates     Show update-check settings",
+    "/codex-remaining updates on  Enable daily update checks",
+    "/codex-remaining updates off Disable automatic update checks",
+    "/codex-remaining updates check Check npm now",
     "",
-    "Auto-refresh: every 5 min; countdowns: every 30 sec",
+    "Quota refresh: 5 min · countdown: 30 sec",
+    "npm update checks: at most once every 24h",
     "Tab: type /codex-remaining and press Tab to choose",
     "Press Enter, Esc or q to close",
   ];
@@ -503,10 +601,21 @@ export function helpLines(mode: DisplayMode): string[] {
 
 export default function codexRemaining(pi: ExtensionAPI): void {
   const quotas = createQuotaPoller(getReport);
-  // Default to the existing progress-bar layout on first install/update.
-  let displayMode: DisplayMode = "bars";
+  // Defaults preserve Bars and turn on once-daily public npm update checks.
+  let preferences = parseUpdatePreferences(undefined);
   let nativeLayoutReady = true;
   let settingsPath = SETTINGS_PATH;
+  let settingsWrite: Promise<void> = Promise.resolve();
+  let updateInFlight: Promise<boolean> | undefined;
+  let sessionActive = false;
+
+  // Serialize writes so a layout change cannot erase the update-check timestamp.
+  const savePreferences = async (): Promise<void> => {
+    const snapshot = JSON.stringify(preferences) + "\n";
+    const write = settingsWrite.catch(() => {}).then(() => writeFile(settingsPath, snapshot, "utf8"));
+    settingsWrite = write;
+    await write;
+  };
 
   const initializeSettingsPath = async (): Promise<void> => {
     try {
@@ -537,10 +646,10 @@ export default function codexRemaining(pi: ExtensionAPI): void {
 
   const loadMode = async (): Promise<void> => {
     try {
-      const saved = JSON.parse(await readFile(settingsPath, "utf8")) as { mode?: unknown };
-      displayMode = parseDisplayMode(saved.mode);
+      preferences = parseUpdatePreferences(JSON.parse(await readFile(settingsPath, "utf8")) as unknown);
     } catch {
-      // No saved preference on initial install: retain the current Bars view.
+      // First install or malformed file: preserve safe defaults.
+      preferences = parseUpdatePreferences(undefined);
     }
   };
 
@@ -552,7 +661,7 @@ export default function codexRemaining(pi: ExtensionAPI): void {
     ctx.ui.setStatus(STATUS_KEY, undefined);
     const { line, progress } = buildQuotaPresentation(
       quotas.getState(),
-      displayMode,
+      preferences.mode,
       text => ctx.ui.theme.fg("accent", text),
       text => ctx.ui.theme.fg("success", text),
       text => ctx.ui.theme.fg("warning", text),
@@ -597,24 +706,84 @@ export default function codexRemaining(pi: ExtensionAPI): void {
     return ok;
   };
 
+  const checkForUpdates = async (ctx: ExtensionContext, force = false): Promise<boolean> => {
+    if (!sessionActive || ctx.mode !== "tui" || ctx.agent.kind !== "main") return false;
+    if (updateInFlight) return updateInFlight;
+    if (!force && !shouldAutoCheckUpdates(preferences)) return false;
+
+    const attempt = (async (): Promise<boolean> => {
+      if (!force) {
+        // Persist the attempt BEFORE sending a request; a restart should not spam npm.
+        preferences.lastUpdateCheckAt = Date.now();
+        try {
+          await savePreferences();
+        } catch {
+          // Skip background checks if rate-limit state cannot be persisted.
+          return false;
+        }
+      }
+      try {
+        const latest = await fetchLatestNpmVersion();
+        if (!sessionActive || (!force && !preferences.updateChecks)) return false;
+        if (!latest) throw new Error("Could not read npm release metadata");
+
+        if (isNewerVersion(EXTENSION_VERSION, latest)) {
+          if (force || preferences.lastNotifiedVersion !== latest) {
+            preferences.lastNotifiedVersion = latest;
+            try { await savePreferences(); } catch { /* Notification is still useful. */ }
+            if (sessionActive && (force || preferences.updateChecks)) {
+              ctx.ui.notify(
+                `Codex Remaining v${latest} available (installed v${EXTENSION_VERSION}). Run: omp plugin upgrade omp-codex-remaining`,
+                "info",
+              );
+            }
+          }
+        } else if (force) {
+          ctx.ui.notify(`Codex Remaining v${EXTENSION_VERSION} is up to date.`, "info");
+        }
+        return true;
+      } catch {
+        if (force && sessionActive) {
+          ctx.ui.notify("Codex Remaining could not check npm for updates. Try again later.", "warning");
+        }
+        // Never interrupt quota display when npm is unavailable.
+        return false;
+      }
+    })();
+    updateInFlight = attempt;
+    try {
+      return await attempt;
+    } finally {
+      if (updateInFlight === attempt) updateInFlight = undefined;
+    }
+  };
+
   pi.on("session_start", async (_event, ctx) => {
     if (ctx.mode !== "tui" || ctx.agent.kind !== "main") return;
+    sessionActive = true;
     ctx.ui.addAutocompleteProvider(withCodexRemainingTab);
     await initializeSettingsPath();
     await loadMode();
     await prepareNativeLayout(ctx);
-    ctx.setInterval(() => { void refresh(ctx); }, TICK_MS);
+    ctx.setInterval(() => {
+      void refresh(ctx);
+      void checkForUpdates(ctx);
+    }, TICK_MS);
     await refresh(ctx, true);
+    void checkForUpdates(ctx);
   });
   pi.on("session_switch", async (_event, ctx) => { await refresh(ctx); });
   pi.on("turn_start", async (_event, ctx) => { await refresh(ctx); });
   pi.on("turn_end", async (_event, ctx) => { await refresh(ctx); });
   pi.on("session_shutdown", (_event, ctx) => {
-    if (ctx.mode === "tui" && ctx.agent.kind === "main") clear(ctx);
+    if (ctx.mode === "tui" && ctx.agent.kind === "main") {
+      sessionActive = false;
+      clear(ctx);
+    }
   });
 
   const showHelp = async (ctx: ExtensionContext): Promise<void> => {
-    const entries = helpLines(displayMode);
+    const entries = helpLines(preferences.mode, preferences.updateChecks);
     await ctx.ui.custom<void>((_tui, theme, _keybindings, done) => ({
       render(width: number) {
         const available = Math.floor(width);
@@ -646,23 +815,42 @@ export default function codexRemaining(pi: ExtensionAPI): void {
   };
 
   pi.registerCommand("codex-remaining", {
-    description: "Show Codex Remaining help; subcommands: compact | bars | toggle | refresh | help",
+    description: "Codex quota and updates; compact | bars | toggle | refresh | updates | help",
     getArgumentCompletions: subcommandCompletions,
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
       if (arg === "compact" || arg === "bars" || arg === "toggle") {
-        displayMode = arg === "toggle"
-          ? (displayMode === "bars" ? "compact" : "bars")
+        preferences.mode = arg === "toggle"
+          ? (preferences.mode === "bars" ? "compact" : "bars")
           : arg;
         try {
-          await writeFile(settingsPath, JSON.stringify({ mode: displayMode }) + "\n", "utf8");
-          ctx.ui.notify(`Codex Remaining: ${displayMode} mode (saved).`, "info");
+          await savePreferences();
+          ctx.ui.notify(`Codex Remaining: ${preferences.mode} mode (saved).`, "info");
         } catch {
-          ctx.ui.notify(`Codex Remaining: ${displayMode} mode (could not save preference).`, "warning");
+          ctx.ui.notify(`Codex Remaining: ${preferences.mode} mode (could not save preference).`, "warning");
         }
         await refresh(ctx);
       } else if (arg === "" || arg === "help") {
         await showHelp(ctx);
+      } else if (arg === "updates") {
+        ctx.ui.notify(
+          `Codex Remaining npm update checks: ${preferences.updateChecks ? "on" : "off"} (installed v${EXTENSION_VERSION}). Use: updates on | off | check`,
+          "info",
+        );
+      } else if (arg === "updates on" || arg === "updates off") {
+        const enabled = arg === "updates on";
+        const wasEnabled = preferences.updateChecks;
+        preferences.updateChecks = enabled;
+        if (enabled && !wasEnabled) preferences.lastUpdateCheckAt = 0;
+        try {
+          await savePreferences();
+          ctx.ui.notify(`Codex Remaining update checks ${enabled ? "enabled" : "disabled"} (saved).`, "info");
+          if (enabled && !wasEnabled) void checkForUpdates(ctx);
+        } catch {
+          ctx.ui.notify("Could not save update-check setting.", "warning");
+        }
+      } else if (arg === "updates check") {
+        await checkForUpdates(ctx, true);
       } else if (arg === "refresh") {
         const ok = await refresh(ctx, true);
         ctx.ui.notify(

@@ -9,6 +9,7 @@ An unofficial **Oh My Pi (OMP)** extension showing **remaining OpenAI Codex quot
 - Five colors: 0–20% red, 21–40% orange, 41–60% yellow, 61–80% lime, 81–100% green.
 - Automatically refreshes usage every 5 minutes, countdowns every 30 seconds; retries failures after 1 minute and marks cached data as stale.
 - Tab completion for every command, with descriptive options; remembers the selected layout.
+- **Update notifications (v0.1.4):** checks public npm metadata at most once per 24 hours, notifies once per new version, never auto-upgrades. Can be disabled.
 - Uses local `omp usage` (no separate API key).
 
 ## Requirements
@@ -37,7 +38,7 @@ omp plugin upgrade omp-codex-remaining
 
 Restart OMP (or use `/reload`) after upgrading. You can check the installed version with `omp plugin list`.
 
-**Update notifications:** In OMP 18.8.7, npm-installed plugins do not have a confirmed user-visible automatic update notification. This extension does not independently check npm for new releases or auto-update itself; check the [npm package](https://www.npmjs.com/package/omp-codex-remaining) for releases and run the command above when needed.
+**Update notifications (v0.1.4):** The extension checks public npm release metadata on startup and at most once per 24 hours afterward. A checked-at timestamp and last-notified version are saved alongside your display preference, to avoid repeated checks or duplicate notices across restarts. If a newer version exists, OMP shows the version and the manual upgrade command. Nothing installs automatically. No API key, OAuth token, or model usage is sent to npm; the network request only retrieves public package metadata. Automatic checks are on by default and can be turned off at any time using `/codex-remaining updates off`. A network failure will not interrupt quota display; manual checks show a warning.
 
 ### Uninstall
 
@@ -59,10 +60,14 @@ Restart OMP afterward. The saved layout preference is stored separately in `code
 | `/codex-remaining` | Open the interactive command help |
 | `/codex-remaining help` | Open the same command help |
 | `/codex-remaining refresh` | Force-refresh Codex usage now |
+| `/codex-remaining updates` | Show update notification settings |
+| `/codex-remaining updates on` | Enable daily npm update notifications |
+| `/codex-remaining updates off` | Disable automatic npm update checks |
+| `/codex-remaining updates check` | Check for a newer npm version now, even when automatic checks are off |
 
 The Help screen lists the commands, current layout and automatic refresh schedule. Close it with **Enter**, **Esc** or **q**. Opening Help does not fetch new quota data.
 
-**Tab autocomplete:** Type `/codex-remaining` and press **Tab** to open all five subcommands (`help`, `compact`, `bars`, `toggle`, `refresh`) with a description beside each option. Select a command from the list and press Enter to run it. Autocomplete also works after a space, for example `/codex-remaining ` + Tab, and filters as you type (e.g. `/codex-remaining re` + Tab).
+**Tab autocomplete:** Type `/codex-remaining` and press **Tab** to open all six subcommands (`help`, `compact`, `bars`, `toggle`, `refresh`, `updates`) with a description beside each option. Select a command from the list and press Enter to run it. Autocomplete also works after a space, for example `/codex-remaining ` + Tab, and filters as you type (e.g. `/codex-remaining re` + Tab). Under `updates`, Tab also completes `on`, `off`, and `check`.
 
 The layout preference is saved automatically to `codex-remaining-settings.json` under the directory returned by `omp config path`.
 
@@ -83,7 +88,7 @@ If you want the Codex Remaining widget instead, explicitly inspect `omp config g
 
 ## Testing
 
-With Bun installed, run `bun run test` from this repository to check Help/Autocomplete, quota rendering, refresh failures/retries, and read-only configuration behavior. Run `bun run build:check` to validate the bundle, and `npm pack --dry-run` to validate package contents. GitHub Actions runs these checks on Windows, macOS, and Linux. Tests are included in GitHub but excluded from the published npm tarball.
+With Bun installed, run `bun run test` from this repository to check Help/Autocomplete, quota rendering, refresh failures/retries, read-only configuration behavior, update settings migration, version comparison, and npm failure handling. Run `bun run build:check` to validate the bundle, and `npm pack --dry-run` to validate package contents. GitHub Actions runs these checks on Windows, macOS, and Linux. Tests are included in GitHub but excluded from the published npm tarball.
 
 ## License
 

@@ -1,12 +1,12 @@
 {
   "name": "omp-codex-remaining",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Display remaining OpenAI Codex quotas in Oh My Pi with compact and progress-bar layouts",
   "type": "module",
   "license": "MIT",
   "author": "Athikarn",
   "scripts": {
-    "test": "bun run tests/codex-remaining-help.test.ts && bun run tests/codex-remaining-stability.test.ts",
+    "test": "bun run tests/codex-remaining-help.test.ts && bun run tests/codex-remaining-stability.test.ts && bun run tests/codex-remaining-updates.test.ts",
     "build:check": "bun build codex-remaining.ts --target=bun --external \"*\" --outdir .build-check"
   },
   "repository": {

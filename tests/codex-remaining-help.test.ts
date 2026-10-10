@@ -33,7 +33,7 @@ const ctx: any = {
         const ui = factory(null, {fg(_color:string,text:string) {return text;}}, null, () => {closed = true;});
         for (const w of [15,25,40,80,120]) {
           const lines: string[] = ui.render(w);
-          assert(lines.length === 14, "help lines count");
+          assert(lines.length === helpLines("bars").length + 2, "help lines count");
           for (const line of lines) assert(Bun.stringWidth(line) <= w, "help overflows width " + w);
         }
         ui.handleInput(key);
@@ -43,11 +43,11 @@ const ctx: any = {
   },
 };
 const commands = helpLines("bars").join("\n");
-for(const s of ["/codex-remaining             Show this help","/codex-remaining help","/codex-remaining compact","/codex-remaining bars","/codex-remaining toggle","/codex-remaining refresh"]) {
+for(const s of ["/codex-remaining             Show this help","/codex-remaining help","/codex-remaining compact","/codex-remaining bars","/codex-remaining toggle","/codex-remaining refresh","/codex-remaining updates","/codex-remaining updates on","/codex-remaining updates off","/codex-remaining updates check"]) {
   assert(commands.includes(s), "missing command in help: "+s);
 }
 assert(commands.includes("Current layout: bars"), "must describe active mode");
-const allCommands = ["help", "compact", "bars", "toggle", "refresh"];
+const allCommands = ["help", "compact", "bars", "toggle", "refresh", "updates"];
 const completeAtSpace = completer!("");
 assert(completeAtSpace?.map(x => x.label).join(",") === allCommands.join(","), "Tab must list all subcommands");
 assert(completeAtSpace.every((x: any) => typeof x.description === "string" && x.description.length > 10),
@@ -55,8 +55,10 @@ assert(completeAtSpace.every((x: any) => typeof x.description === "string" && x.
 assert(completer!("r")?.map(x => x.label).join(",") === "refresh", "prefix filters refresh");
 assert(completer!("H")?.map(x => x.label).join(",") === "help", "prefix filtering is case insensitive");
 assert(completer!("unknown") === null, "no unrelated matches");
-assert(completer!("bars ") === null, "no nested completions");
-console.log("PASS Tab completions and descriptions for all five subcommands");
+assert(completer!("bars ") === null, "no unrelated nested completions");
+assert(completer!("updates ")?.map(x => x.label).join(",") === "on,off,check", "nested update actions");
+assert(completer!("updates c")?.map(x => x.label).join(",") === "check", "nested update filtering");
+console.log("PASS Tab completions and descriptions for all six subcommands plus update actions");
 
 await handler!("",ctx);
 await handler!("help",ctx);
@@ -66,6 +68,10 @@ assert(modelReads === 0, "help must not call refresh/model access");
 assert(notices.length === 0, "help must not trigger quota-refreshed notification");
 console.log("PASS bare command and help alias show modal; no force-refresh; 5 terminal widths; Enter/Esc/q close");
 
+await handler!("updates",ctx);
+assert(notices.some(n=>n.includes("npm update checks: on") && n.includes("installed v0.1.4")),
+  "updates status reports enabled state and current version");
+assert(modelReads === 0, "updates status must not invoke Codex quota");
 await handler!("refresh",ctx);
 assert(modelReads === 1, "refresh must access model");
 assert(notices.some(n=>n.includes("failed or unavailable")), "do not report a successful refresh when Codex is not active");
@@ -95,7 +101,7 @@ const baseProvider: any = {
 };
 const wrapped = withCodexRemainingTab(baseProvider);
 const noSpace = wrapped.trySyncSlashCompletion!("/codex-remaining");
-assert(noSpace?.items.map(item => item.label).join(",") === allCommands.join(","), "bare Tab lists five options");
+assert(noSpace?.items.map(item => item.label).join(",") === allCommands.join(","), "bare Tab lists six options");
 assert(noSpace?.items.every(item => item.description && item.description.length > 10), "bare Tab shows right-side descriptions");
 assert(noSpace?.prefix === "/codex-remaining", "bare Tab preserves slash prefix");
 for (const item of noSpace!.items) {
@@ -103,7 +109,7 @@ for (const item of noSpace!.items) {
   assert(applied.lines[0] === "/codex-remaining " + item.label + " ", "Tab selection inserts " + item.label);
 }
 const fullList = await wrapped.getSuggestions(["/codex-remaining"], 0, 16);
-assert(fullList?.items.length === 5, "async completion also lists all five commands");
+assert(fullList?.items.length === 6, "async completion also lists all six commands");
 assert(baseCalls.length === 0, "exact command must not fall through to OMP default suggestions");
 const unrelated = await wrapped.getSuggestions(["/help"], 0, 5);
 assert(unrelated?.items[0]?.label === "other", "unrelated commands delegate to default suggestions");
