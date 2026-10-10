@@ -5,9 +5,9 @@ An unofficial **Oh My Pi (OMP)** extension showing **remaining OpenAI Codex quot
 ## Features
 
 - **Compact:** 5h/7d remaining percentages, reset countdowns, plan, and reset credits.
-- **Bars (default):** two colored progress bars with reset date/time in your local timezone.
+- **Bars (default, v0.1.9):** two independent bordered panels: **Codex Summary** (plan/credits and optionally Tibo/Forecast) and **Quotas** (5h/7d colored progress bars). Hiding Tibo or Forecast collapses only its summary rows: no empty lines, no switch back to legacy layout. Long public-data sections wrap for small terminals.
 - Five colors: 0–20% red, 21–40% orange, 41–60% yellow, 61–80% lime, 81–100% green.
-- **Fast startup and model switching (v0.1.7):** registers commands immediately, shows cached quota or a loading indicator before CLI fetching completes, and detects provider switches within about 250ms. Network/CLI/config checks run in the background. Cached quota is clearly marked stale until refreshed.
+- **Fast startup and model switching (v0.1.7+):** registers commands immediately, shows cached quota or a loading indicator before CLI fetching completes, and detects provider switches within about 250ms. Network/CLI/config checks run in the background. Cached quota is clearly marked stale until refreshed. **v0.1.9** fetches Tibo/Forecast concurrently and commits them to the visible UI as one snapshot without gating the independent quota refresh.
 - Automatically refreshes usage every 5 minutes, countdowns every 30 seconds; retries failures after 1 minute and marks cached data as stale.
 - Tab completion for every command, with descriptive options; remembers the selected layout.
 - **Native Right Arrow chaining (v0.1.6):** choosing `updates`, `alerts`, or `alerts threshold` opens its nested menu automatically in OMP 18.8.8, without pressing Tab again.
@@ -74,7 +74,8 @@ Restart OMP afterward. The saved layout preference is stored separately in `code
 | `/codex-remaining alerts on` | Enable low quota alerts (default) |
 | `/codex-remaining alerts off` | Disable low quota alerts |
 | `/codex-remaining alerts threshold 20` | Set warning threshold to 10–90% (critical remains at 10%) |
-| `/codex-remaining tibo` | Show public reset/bonus credit announcement status |
+| `/codex-remaining tibo` | Open the detailed Tibo reset/forecast overlay without fetching data |
+| `/codex-remaining tibo details` | Alias for the same dedicated details overlay |
 | `/codex-remaining tibo on` | Show Tibo information after plan/credits (default) |
 | `/codex-remaining tibo off` | Hide Tibo and stop its background requests |
 | `/codex-remaining tibo refresh` | Force check new Tibo regular and banked reset records |
@@ -103,7 +104,16 @@ Use `/codex-remaining alerts off` to disable automatic warnings, `alerts on` to 
 Community Reset data is not an official OpenAI account record. The extension reads [Codex Resets](https://codex-resets.com/) (primary), [Codex Reset](https://codex-reset.com/) (secondary, with its [API](https://codex-reset.com/api/timeline) and [forecast](https://codex-reset.com/api/forecast)), and [Tibo](https://tibo.cc/) (third-resort fallback). All API calls are read-only, do not include your Codex token, and run in the background. The sources are not independent proof if one republishes another. On a narrow terminal the sections wrap onto separate header rows rather than losing Forecast. The separators distinguish your actual account credits from public announcements and experimental predictions:
 
 ```text
-⏱ Plus · ✦ 3 exp 12d 1h  │  Tibo: Reset 7 Oct · Banked 8 Oct  │  Forecast: 24h 20% · 48h 35% · low
+╭─ Codex Summary ───────────────────────────────────────────────────╮
+│ ⏱ Plus · ✦ 3 exp 12d 1h                                           │
+│ Tibo: Reset 7 Oct · Banked 8 Oct                                 │
+│ Forecast: Reset chance within 24h: 20% · within 48h: 35% · low    │
+╰───────────────────────────────────────────────────────────────────╯
+
+╭─ Quotas ──────────────────────────────────────────────────────────╮
+│ 5h ███████████████████░░░ 95%  ↻ 1h                              │
+│ 7d █████░░░░░░░░░░░░░░░░ 22%  ↻ 4d                               │
+╰───────────────────────────────────────────────────────────────────╯
 ```
 
 `Reset` is the latest regular quota-reset announcement. `Banked` is the latest public announcement about bonus/banked reset credits; it **does not** confirm that a credit was delivered to your personal account. If a future announcement includes a deadline, it is displayed as `Next ... by [date]`, not an exact guaranteed reset time. Stale records are labeled `(stale)` and outages never block the quota widget. The data loads asynchronously, can be cached locally, and can be disabled with `/codex-remaining tibo off`. The numbers above are illustrative, not live. Forecast uses only [codex-reset.com](https://codex-reset.com/api/forecast), never averages or falls back to a different forecast model. The API currently returns **24h and 48h** probabilities; this extension does not fabricate a seven-day probability. Use `/codex-remaining tibo forecast` for details. Every optional feature (quota alerts, npm update checks, community resets/notifications, forecast display) starts ON; any explicit OFF setting is preserved across sessions. Community alerts start from the last seen events and never replay old announcements on a fresh install. [Attribution: codex-reset.com](https://codex-reset.com/).

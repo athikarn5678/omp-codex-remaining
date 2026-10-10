@@ -33,7 +33,15 @@ const ctx: any = {
         const ui = factory(null, {fg(_color:string,text:string) {return text;}}, null, () => {closed = true;});
         for (const w of [15,25,40,80,120]) {
           const lines: string[] = ui.render(w);
-          assert(lines.length === helpLines("bars").length + 2, "help lines count");
+          if (customCount <= 3) {
+            assert(lines.length === helpLines("bars").length + 2, "help lines count");
+          } else {
+            assert(lines[0]?.includes("Tibo") || w <= 15, "Tibo details has own panel");
+            if (w >= 80) {
+              assert(lines.some(line => line.includes("EXPERIMENTAL FORECAST")), "Tibo overlay includes forecast");
+              assert(lines.some(line => line.includes("BANKED") || line.includes("banked")), "Tibo overlay includes credits");
+            }
+          }
           for (const line of lines) assert(Bun.stringWidth(line) <= w, "help overflows width " + w);
         }
         ui.handleInput(key);
@@ -58,7 +66,7 @@ assert(completer!("unknown") === null, "no unrelated matches");
 assert(completer!("bars ") === null, "no unrelated nested completions");
 assert(completer!("updates ")?.map(x => x.label).join(",") === "on,off,check", "nested update actions");
 assert(completer!("updates c")?.map(x => x.label).join(",") === "check", "nested update filtering");
-assert(completer!("tibo ")?.map(x => x.label).join(",") === "on,off,refresh,forecast,alerts", "nested Tibo actions");
+assert(completer!("tibo ")?.map(x => x.label).join(",") === "details,on,off,refresh,forecast,alerts", "nested Tibo actions");
 assert(completer!("tibo r")?.map(x => x.label).join(",") === "refresh", "nested Tibo filtering");
 assert(completer!("tibo forecast ")?.map(x => x.label).join(",") === "on,off,refresh", "nested forecast actions");
 assert(completer!("tibo alerts ")?.map(x => x.label).join(",") === "on,off", "nested announcement alert actions");
@@ -74,7 +82,7 @@ assert(notices.length === 0, "help must not trigger quota-refreshed notification
 console.log("PASS bare command and help alias show modal; no force-refresh; 5 terminal widths; Enter/Esc/q close");
 
 await handler!("updates",ctx);
-assert(notices.some(n=>n.includes("npm update checks: on") && n.includes("installed v0.1.8")),
+assert(notices.some(n=>n.includes("npm update checks: on") && n.includes("installed v0.1.9")),
   "updates status reports enabled state and current version");
 await handler!("alerts",ctx);
 assert(notices.some(n=>n.includes("quota alerts: on") && n.includes("warning <=20%")),
@@ -82,7 +90,10 @@ assert(notices.some(n=>n.includes("quota alerts: on") && n.includes("warning <=2
 await handler!("alerts threshold",ctx);
 assert(notices.some(n => n.includes("/codex-remaining alerts threshold 20")), "threshold without number explains valid syntax");
 await handler!("tibo",ctx);
-assert(notices.some(n => n.includes("Tibo (community)")), "Tibo status available without requiring quota fetch");
+assert(customCount === 4, "Tibo opens dedicated details overlay instead of toast");
+await handler!("tibo details",ctx);
+assert(customCount === 5, "Tibo details alias opens the same overlay");
+assert(modelReads === 0, "Tibo details must render immediately without network or quota CLI");
 await handler!("tibo forecast",ctx);
 assert(notices.some(n => n.includes("Forecast: loading") && n.includes("codex-reset.com/api/forecast")),
   "forecast status gives source immediately without model/CLI");
@@ -197,7 +208,7 @@ for (const name of ["updates", "alerts", "tibo"]) {
 for (const [typed, expectedLabel, expectedResult, expectedNext] of [
   ["/codex-remaining up", "updates", "/codex-remaining updates ", "on"],
   ["/codex-remaining al", "alerts", "/codex-remaining alerts ", "on"],
-  ["/codex-remaining ti", "tibo", "/codex-remaining tibo ", "on"],
+  ["/codex-remaining ti", "tibo", "/codex-remaining tibo ", "details"],
   ["/codex-remaining tibo for", "forecast", "/codex-remaining tibo forecast ", "on"],
   ["/codex-remaining tibo ale", "alerts", "/codex-remaining tibo alerts ", "on"],
   ["/codex-remaining alerts th", "threshold", "/codex-remaining alerts threshold ", "10"],

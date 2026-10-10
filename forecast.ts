@@ -60,17 +60,27 @@ export function parseForecastCache(raw: unknown): ForecastData | undefined {
     ...(typeof r.note === "string" ? { note: r.note.slice(0,200) } : {}),
   };
 }
-export function forecastInline(state: ForecastState, now = Date.now()): string {
+export function forecastInline(
+  state: ForecastState, now = Date.now(), descriptive = false,
+): string {
   if (state.status === "loading") return "Forecast: loading…";
   if (state.status === "unavailable") return "Forecast: unavailable";
   if (state.status === "no_forecast") return "Forecast: no forecast";
-  const parts = [
-    state.data.p24 !== undefined ? "24h " + state.data.p24 + "%" : undefined,
-    state.data.p48 !== undefined ? "48h " + state.data.p48 + "%" : undefined,
-    state.data.confidence,
-  ].filter(Boolean);
+  // Percentages are probability of an EXTRA reset occurring within each
+  // horizon, not an account quota countdown or a guaranteed reset time.
+  const parts = descriptive
+    ? [
+        state.data.p24 !== undefined ? "Reset chance within 24h: " + state.data.p24 + "%" : undefined,
+        state.data.p48 !== undefined ? "within 48h: " + state.data.p48 + "%" : undefined,
+        state.data.confidence + " confidence",
+      ]
+    : [
+        state.data.p24 !== undefined ? state.data.p24 + "% chance within 24h" : undefined,
+        state.data.p48 !== undefined ? state.data.p48 + "% within 48h" : undefined,
+        state.data.confidence,
+      ];
   const stale = state.status === "stale" || now - state.data.updatedAt > FORECAST_MAX_AGE_MS;
-  return "Forecast: " + parts.join(" · ") + (stale ? " (stale)" : "");
+  return "Forecast: " + parts.filter(Boolean).join(" · ") + (stale ? " (stale)" : "");
 }
 export function forecastDetails(state: ForecastState, now = Date.now()): string {
   if (state.status === "unavailable" || state.status === "loading" || state.status === "no_forecast")

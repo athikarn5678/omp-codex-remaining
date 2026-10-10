@@ -1,5 +1,5 @@
 import {FORECAST_URL,fetchForecast,parseForecast,parseForecastCache,forecastInline,forecastDetails} from "../forecast.ts";
-import {buildQuotaPresentation,frameRemaining,calculateTiboNotifications,parseTiboAlertMarkers,parseUpdatePreferences} from "../codex-remaining.ts";
+import {buildQuotaPresentation,frameRemaining,frameBarsDashboard,calculateTiboNotifications,parseTiboAlertMarkers,parseUpdatePreferences} from "../codex-remaining.ts";
 import {parseSecondaryTimeline,parseTiboPayload,tiboInline,type TiboSummary} from "../tibo.ts";
 const assert=(v:unknown,msg:string)=>{if(!v)throw Error(msg)};
 const now=Date.parse("2026-10-11T00:00:00Z");
@@ -7,7 +7,9 @@ const example={mode:"model",updated_at:new Date(now).toISOString(),probabilities
  confidence:"low",confidence_note:"Experimental: backtest not calibrated",last_reset_at:"2026-10-07T03:35:09Z"};
 const good=parseForecast(example,now);
 assert(good.status==="estimated" && good.data.p24===20 && good.data.p48===35,"parse real 24/48 API schema");
-assert(forecastInline(good,now)==="Forecast: 24h 20% · 48h 35% · low","compact formatting exact");
+assert(forecastInline(good,now)==="Forecast: 20% chance within 24h · 35% within 48h · low","compact wording states chance and horizon");
+assert(forecastInline(good,now,true)==="Forecast: Reset chance within 24h: 20% · within 48h: 35% · low confidence",
+ "bars wording explicitly states estimated reset chance");
 assert(forecastDetails(good).includes(FORECAST_URL),"details cite single forecast source");
 assert(!forecastInline(good,now).includes("7d"),"never invent seven-day forecast");
 const stale=parseForecast({...example,updated_at:new Date(now-61*60_000).toISOString()},now);
@@ -29,7 +31,7 @@ assert(parseUpdatePreferences({tiboEnabled:false,tiboAlerts:false,forecastEnable
 assert(parseUpdatePreferences({forecastCached:good.data}).forecastCached?.p24===20,"forecast cache persisted");
 const line=buildQuotaPresentation({lastSuccessAt:0,lastAttemptFailed:false,nextAttempt:0},"bars",x=>x,x=>x,x=>x,
   now,"Tibo: Reset 7 Oct · Banked 8 Oct",forecastInline(good,now)).line!;
-assert(line.includes("│  Forecast: 24h 20% · 48h 35% · low") && line.indexOf("Tibo:")<line.indexOf("Forecast:"),
+assert(line.includes("│  Forecast: 20% chance within 24h · 35% within 48h · low") && line.indexOf("Tibo:")<line.indexOf("Forecast:"),
   "forecast after distinct Tibo separator");
 assert(!buildQuotaPresentation({lastSuccessAt:0,lastAttemptFailed:false,nextAttempt:0},"bars",x=>x,x=>x,x=>x,now,"Tibo: Reset 7 Oct").line?.includes("Forecast"),
   "hide forecast without hiding Tibo");
@@ -76,3 +78,42 @@ assert(parsed?.regular?.announcedAt.startsWith("2026-10-07") && parsed.banked &&
 assert(parseSecondaryTimeline({...timeline,updated_at:"2026-09-01T00:00:00Z"},now)?.stale===true,
  "secondary freshness respected");
 console.log("PASS reset notifications default ON, baseline/dedup, confirmed-only fallback, stale safety");
+
+const summaryLayout = "⏱ Plus · ✦ 3 exp 12d 1h  │  Tibo: Reset 7 Oct · Banked 8 Oct  │  " +
+  forecastInline(good, now, true);
+for (const width of [8, 12, 24, 40, 60, 84, 100, 160]) {
+  const rows = frameBarsDashboard(summaryLayout, x => x, width, [
+    {label:"5h",pct:95,resetAt:now+3600_000,reset:"1h"},
+    {label:"7d",pct:22,resetAt:now+4*86400_000,reset:"4d"},
+  ],x => x);
+  assert(rows.filter(x => x.startsWith("╭")).length === 2, "two panels at width "+width);
+  assert(rows.some(x => x.includes("Quotas") || width <= 12), "quota panel "+width);
+  assert(rows.every(x => Bun.stringWidth(x)<=width), "dashboard within terminal width "+width);
+  if(width>=40) {
+    assert(rows.some(x => x.includes("Tibo:")), "Tibo is readable in summary "+width);
+    assert(rows.some(x => x.includes("Forecast:")), "Forecast is readable "+width);
+  }
+}
+for (const [label, tiboText, forecastText] of [
+  ["all", "Tibo: Reset 7 Oct · Banked 8 Oct", "Forecast: chance within 24h 20%"],
+  ["no-forecast", "Tibo: Reset 7 Oct · Banked 8 Oct", undefined],
+  ["no-tibo", undefined, undefined],
+] as const) {
+  const {line: rendered,progress} = buildQuotaPresentation(
+    {report:{provider:"openai-codex", metadata:{planType:"plus"},
+      limits:[{scope:{windowId:"5h"},amount:{remainingFraction:0.95}},
+              {scope:{windowId:"7d"},amount:{remainingFraction:0.22}}]},
+      lastSuccessAt:now,lastAttemptFailed:false,nextAttempt:now+60000},
+    "bars",x=>x,x=>x,x=>x,now,tiboText,forecastText,
+  );
+  const rows = frameBarsDashboard(rendered!,x=>x,80,progress,x=>x);
+  assert(rows.filter(x=>x.startsWith("╭")).length===2,label+" keeps two frames");
+  assert(rows.some(x=>x.includes("Plus")) && rows.some(x=>x.includes("Quotas")),label+" keeps account and quota");
+  assert(rows.some(x=>x.includes("Tibo:")) === !!tiboText,label+" conditional Tibo");
+  assert(rows.some(x=>x.includes("Forecast:")) === !!forecastText,label+" conditional Forecast");
+  assert(!rows.some(x=>x.includes("undefined")),"no empty placeholders "+label);
+  assert(rows.every(x=>Bun.stringWidth(x)<=80),label+" width");
+}
+const unchangedCompact = frameRemaining("⏱ Plus · 5h 95% · 7d 22%",x=>x,80);
+assert(unchangedCompact.filter(x=>x.startsWith("╭")).length===1,"compact retains one legacy frame");
+console.log("PASS two-box QoL dashboard, all toggles, responsive widths, compact unchanged");
