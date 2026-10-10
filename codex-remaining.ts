@@ -12,13 +12,14 @@ import type { AutocompleteProvider } from "@oh-my-pi/pi-tui";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
+import { fetchTiboSummary, parseTiboCache, tiboInline, TIBO_REFRESH_MS, type TiboSummary } from "./tibo.ts";
 
 const WIDGET_KEY = "codex-remaining";
 const STATUS_KEY = "codex-remaining"; // clear legacy status from the prior version
 const REFRESH_MS = 5 * 60_000;
 const TICK_MS = 30_000;
 const ANSI_DEFAULT_FG = "\x1b[39m";
-export const EXTENSION_VERSION = "0.1.6";
+export const EXTENSION_VERSION = "0.1.7";
 const UPDATE_CHECK_MS = 24 * 60 * 60_000;
 const NPM_LATEST_URL = "https://registry.npmjs.org/omp-codex-remaining/latest";
 export type DisplayMode = "compact" | "bars";
@@ -359,6 +360,16 @@ export function createQuotaPoller(
     getState(): QuotaPollState {
       return { report, lastSuccessAt, lastAttemptFailed, nextAttempt };
     },
+    seedCached(cached: Report, fetchedAt: number): void {
+      // Startup may render the saved snapshot instantly, but must fetch a fresh
+      // copy without treating this persisted value as current live usage.
+      if (report || !cached || cached.provider !== "openai-codex" ||
+          quotaWindows(cached, clock()).length === 0) return;
+      report = cached;
+      lastSuccessAt = fetchedAt;
+      lastAttemptFailed = true;
+      nextAttempt = 0;
+    },
     async refresh(force = false): Promise<boolean> {
       if (pending) return pending;
       if (!force && clock() < nextAttempt) return !lastAttemptFailed && !!report;
@@ -412,6 +423,10 @@ export type UpdatePreferences = {
   quotaAlerts: boolean;
   quotaWarningPercent: number;
   lastQuotaAlerts: QuotaAlertState;
+  tiboEnabled: boolean;
+  tiboCached?: TiboSummary;
+  lastQuotaReport?: Report;
+  lastQuotaSuccessAt: number;
 };
 
 type Version = { major: number; minor: number; patch: number; prerelease?: string[] };
@@ -449,6 +464,42 @@ export function isNewerVersion(installed: string, latest: string): boolean {
   return false;
 }
 
+/** Validate a compact, local-only quota snapshot before using it in the TUI. */
+export function parseQuotaSnapshot(value: unknown): Report | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const input = value as Report;
+  if (input.provider !== "openai-codex" || !Array.isArray(input.limits)) return;
+  const limits: Limit[] = [];
+  for (const item of input.limits.slice(0, 8)) {
+    const id = item?.scope?.windowId ?? item?.window?.id;
+    if (!["5h", "1d", "7d", "monthly"].includes(id ?? "")) continue;
+    const frac = item?.amount?.remainingFraction;
+    const used = item?.amount?.usedFraction;
+    if (!(typeof frac === "number" && Number.isFinite(frac)) &&
+        !(typeof used === "number" && Number.isFinite(used))) continue;
+    const reset = item?.window?.resetsAt;
+    limits.push({
+      scope: { windowId: id },
+      amount: { ...(typeof frac === "number" ? { remainingFraction: frac } : { usedFraction: used }) },
+      window: typeof reset === "number" && Number.isFinite(reset) ? { resetsAt: reset } : {},
+    });
+  }
+  if (!limits.length) return;
+  const credits = input.resetCredits;
+  const creditList = Array.isArray(credits?.credits) ? credits!.credits.slice(0, 30).map(c => ({
+    status: c.status === "available" ? "available" : undefined,
+    expiresAt: typeof c.expiresAt === "string" ? c.expiresAt : undefined,
+  })) : [];
+  const count = credits?.availableCount;
+  const tier = input.metadata?.planType;
+  return {
+    provider: "openai-codex", limits,
+    ...(typeof tier === "string" ? { metadata: { planType: tier.slice(0, 50) } } : {}),
+    ...(typeof count === "number" && Number.isFinite(count) && count >= 0
+      ? { resetCredits: { availableCount: count, credits: creditList } } : {}),
+  };
+}
+
 export function parseUpdatePreferences(input: unknown): UpdatePreferences {
   const record = input && typeof input === "object" && !Array.isArray(input)
     ? input as Record<string, unknown>
@@ -481,6 +532,12 @@ export function parseUpdatePreferences(input: unknown): UpdatePreferences {
     quotaWarningPercent: typeof warning === "number" && Number.isInteger(warning) && warning >= 10 && warning <= 90
       ? warning : 20,
     lastQuotaAlerts,
+    tiboEnabled: typeof record.tiboEnabled === "boolean" ? record.tiboEnabled : true,
+    tiboCached: parseTiboCache(record.tiboCached),
+    lastQuotaReport: parseQuotaSnapshot(record.lastQuotaReport),
+    lastQuotaSuccessAt: typeof record.lastQuotaSuccessAt === "number" &&
+      Number.isFinite(record.lastQuotaSuccessAt) && record.lastQuotaSuccessAt > 0
+      ? record.lastQuotaSuccessAt : 0,
   };
 }
 
@@ -559,6 +616,7 @@ const SUBCOMMANDS = [
   { label: "refresh", description: "Force-refresh Codex usage now" },
   { label: "updates", description: "Configure and check npm update notifications" },
   { label: "alerts", description: "Configure low Codex quota warnings" },
+  { label: "tibo", description: "Public regular/banked reset announcements (toggle or refresh)" },
 ] as const;
 const UPDATE_ACTIONS = [
   { label: "on", description: "Enable daily npm update notifications" },
@@ -571,6 +629,11 @@ const ALERT_ACTIONS = [
   { label: "threshold", description: "Set warning threshold (10-90%, critical fixed at 10%)" },
 ] as const;
 const ALERT_THRESHOLD_PRESETS = [10, 15, 20, 25, 30, 50] as const;
+const TIBO_ACTIONS = [
+  { label: "on", description: "Show Tibo reset announcements after your account credits" },
+  { label: "off", description: "Hide Tibo and stop fetching community announcements" },
+  { label: "refresh", description: "Recheck regular and banked reset announcements now" },
+] as const;
 
 /** Complete arguments after an existing command, including nested alert settings. */
 export function subcommandCompletions(argumentPrefix: string) {
@@ -584,10 +647,10 @@ export function subcommandCompletions(argumentPrefix: string) {
         }))
       : null;
   }
-  const nested = /^(updates|alerts) +([a-z]*)$/i.exec(argumentPrefix);
+  const nested = /^(updates|alerts|tibo) +([a-z]*)$/i.exec(argumentPrefix);
   if (nested) {
     const parent = nested[1]!.toLowerCase();
-    const actions = parent === "updates" ? UPDATE_ACTIONS : ALERT_ACTIONS;
+    const actions = parent === "updates" ? UPDATE_ACTIONS : parent === "alerts" ? ALERT_ACTIONS : TIBO_ACTIONS;
     const matches = actions.filter(item => item.label.startsWith(nested[2]!.toLowerCase()));
     return matches.length
       ? matches.map(item => ({ label: item.label, value: parent + " " + item.label + " ", description: item.description }))
@@ -613,7 +676,7 @@ export function withCodexRemainingTab(current: AutocompleteProvider): Autocomple
   // This uses the editor's own chaining behavior for Tab and Right;
   // no keybinding interception or OMP source modification is needed.
   const expandable = (label: string, value: string) =>
-    (label === "updates" || label === "alerts" || label === "threshold") ? value.trimEnd() + "/" : value;
+    (label === "updates" || label === "alerts" || label === "tibo" || label === "threshold") ? value.trimEnd() + "/" : value;
   const matches = SUBCOMMANDS.map(item => ({
     label: item.label,
     value: expandable(item.label, "codex-remaining " + item.label),
@@ -647,8 +710,8 @@ export function withCodexRemainingTab(current: AutocompleteProvider): Autocomple
     applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
       const marker = item.value;
       const isOwnExpandable = (
-        marker === "codex-remaining updates/" || marker === "codex-remaining alerts/"
-        || marker === "updates/" || marker === "alerts/" || marker === "alerts threshold/"
+        marker === "codex-remaining updates/" || marker === "codex-remaining alerts/" || marker === "codex-remaining tibo/"
+        || marker === "updates/" || marker === "alerts/" || marker === "tibo/" || marker === "alerts threshold/"
       );
       if (!isOwnExpandable) return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
 
@@ -695,14 +758,16 @@ export function buildQuotaPresentation(
   success: (text: string) => string,
   warningStyle: (text: string) => string,
   now = Date.now(),
+  tiboText?: string,
 ): { line?: string; progress: RemainingProgress[] } {
   const report = state.report;
   const quotaLine = report && formatRemainingColored(report, accent, now, success, mode);
   const problem = quotaAvailabilityNote(state, now);
   const warning = problem && warningStyle(problem);
-  const line = quotaLine
+  const baseLine = quotaLine
     ? (warning ? quotaLine + " · " + warning : quotaLine)
-    : (warning ? "⏱ Codex · " + warning : undefined);
+    : (warning ? "⏱ Codex · " + warning : "⏱ Codex · checking quotas…");
+  const line = tiboText ? baseLine + "  │  " + tiboText : baseLine;
   const progress = report && mode === "bars"
     ? quotaWindows(report, now)
         .filter(window => window.label === "5h" || window.label === "7d")
@@ -731,6 +796,9 @@ export function helpLines(mode: DisplayMode, updateChecks = true, quotaAlerts = 
     "/codex-remaining alerts on    Enable alerts for 5h and 7d",
     "/codex-remaining alerts off   Disable low-quota alerts",
     "/codex-remaining alerts threshold 20 Set warning % (10-90)",
+    "/codex-remaining tibo         Latest community reset announcements",
+    "/codex-remaining tibo on/off  Show or hide Tibo inline status",
+    "/codex-remaining tibo refresh Check community announcements now",
     "",
     "Critical quota threshold: 10% · daily npm checks: 24h",
     "Quota refresh: 5 min · countdown: 30 sec",
@@ -748,6 +816,11 @@ export default function codexRemaining(pi: ExtensionAPI): void {
   let settingsWrite: Promise<void> = Promise.resolve();
   let updateInFlight: Promise<boolean> | undefined;
   let lastAlertEvaluatedReport: Report | undefined;
+  let tibo: TiboSummary | undefined;
+  let tiboNextCheckAt = 0;
+  let tiboPending: Promise<boolean> | undefined;
+  let persistedQuotaAt = 0;
+  let lastProvider: string | undefined;
   let sessionActive = false;
 
   // Serialize writes so a layout change cannot erase the update-check timestamp.
@@ -759,10 +832,17 @@ export default function codexRemaining(pi: ExtensionAPI): void {
   };
 
   const initializeSettingsPath = async (): Promise<void> => {
+    // The default ~/.omp/agent path is usable immediately; config path
+    // discovery is optional background work, never a startup prerequisite.
     try {
-      settingsPath = join((await runOmp(["config", "path"])).trim(), "codex-remaining-settings.json");
+      const found = join((await runOmp(["config", "path"])).trim(), "codex-remaining-settings.json");
+      if (found !== settingsPath) {
+        settingsPath = found;
+        await loadMode();
+        installCachedValues();
+      }
     } catch {
-      // Older OMP versions: standard agent directory remains the fallback.
+      // Default settings path remains usable.
     }
   };
 
@@ -793,6 +873,12 @@ export default function codexRemaining(pi: ExtensionAPI): void {
       preferences = parseUpdatePreferences(undefined);
     }
   };
+  const installCachedValues = (): void => {
+    if (preferences.lastQuotaReport && preferences.lastQuotaSuccessAt > 0) {
+      quotas.seedCached(preferences.lastQuotaReport, preferences.lastQuotaSuccessAt);
+    }
+    if (!tibo && preferences.tiboCached) tibo = preferences.tiboCached;
+  };
 
   const clear = (ctx: ExtensionContext): void => {
     ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -806,6 +892,8 @@ export default function codexRemaining(pi: ExtensionAPI): void {
       text => ctx.ui.theme.fg("accent", text),
       text => ctx.ui.theme.fg("success", text),
       text => ctx.ui.theme.fg("warning", text),
+      Date.now(),
+      preferences.tiboEnabled ? tiboInline(tibo, !tibo || Date.now() >= tiboNextCheckAt) : undefined,
     );
     ctx.ui.setWidget(
       WIDGET_KEY,
@@ -837,6 +925,9 @@ export default function codexRemaining(pi: ExtensionAPI): void {
       clear(ctx);
       return false;
     }
+    // Instant: render cached quota or a nonblocking loading state BEFORE the
+    // OMP CLI (~0.8s) fetch completes. Old quota is explicitly marked stale.
+    show(ctx);
     const ok = await quotas.refresh(force);
     // A model switch can occur while the CLI subprocess is still resolving.
     if ((ctx.models.current() ?? ctx.model)?.provider !== "openai-codex") {
@@ -844,7 +935,17 @@ export default function codexRemaining(pi: ExtensionAPI): void {
       return false;
     }
     show(ctx);
-    const latest = quotas.getState().report;
+    const state = quotas.getState();
+    const latest = state.report;
+    if (ok && latest && state.lastSuccessAt > persistedQuotaAt) {
+      const snapshot = parseQuotaSnapshot(latest);
+      if (snapshot) {
+        persistedQuotaAt = state.lastSuccessAt;
+        preferences.lastQuotaReport = snapshot;
+        preferences.lastQuotaSuccessAt = state.lastSuccessAt;
+        void savePreferences().catch(() => {});
+      }
+    }
     if (ok && latest && preferences.quotaAlerts && latest !== lastAlertEvaluatedReport) {
       const result = evaluateQuotaAlerts(latest, preferences);
       if (result.changed) {
@@ -869,6 +970,33 @@ export default function codexRemaining(pi: ExtensionAPI): void {
       }
     }
     return ok;
+  };
+
+  // Tibo never blocks the account widget. Community data uses its own timer.
+  const refreshTibo = async (ctx: ExtensionContext, force = false): Promise<boolean> => {
+    if (!preferences.tiboEnabled || !sessionActive || ctx.mode !== "tui" || ctx.agent.kind !== "main") return false;
+    if (tiboPending) return tiboPending;
+    if (!force && Date.now() < tiboNextCheckAt) return false;
+    tiboNextCheckAt = Date.now() + TIBO_REFRESH_MS;
+    const task = (async () => {
+      try {
+        const fresh = await fetchTiboSummary();
+        if (!fresh) throw new Error("No verified public records");
+        if (!preferences.tiboEnabled || !sessionActive) return false;
+        tibo = fresh;
+        preferences.tiboCached = fresh;
+        void savePreferences().catch(() => {});
+        if ((ctx.models.current() ?? ctx.model)?.provider === "openai-codex") show(ctx);
+        return true;
+      } catch {
+        tiboNextCheckAt = Date.now() + 2 * 60_000;
+        if (tibo) tibo = { ...tibo, stale: true };
+        if ((ctx.models.current() ?? ctx.model)?.provider === "openai-codex") show(ctx);
+        return false;
+      }
+    })();
+    tiboPending = task;
+    try { return await task; } finally { if (tiboPending === task) tiboPending = undefined; }
   };
 
   const checkForUpdates = async (ctx: ExtensionContext, force = false): Promise<boolean> => {
@@ -923,23 +1051,46 @@ export default function codexRemaining(pi: ExtensionAPI): void {
     }
   };
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", (_event, ctx) => {
     if (ctx.mode !== "tui" || ctx.agent.kind !== "main") return;
     sessionActive = true;
+    // Register command completion synchronously before any I/O.
     ctx.ui.addAutocompleteProvider(withCodexRemainingTab);
-    await initializeSettingsPath();
-    await loadMode();
-    await prepareNativeLayout(ctx);
+    lastProvider = (ctx.models.current() ?? ctx.model)?.provider;
+    if (lastProvider === "openai-codex") show(ctx); // immediate indicator
+
+    // Model selector changes are not guaranteed to emit a turn event.
+    // Cheap identity checks avoid spawning the CLI unless provider changed.
+    ctx.setInterval(() => {
+      const provider = (ctx.models.current() ?? ctx.model)?.provider;
+      if (provider === lastProvider) return;
+      lastProvider = provider;
+      void refresh(ctx);
+    }, 250);
     ctx.setInterval(() => {
       void refresh(ctx);
+      void refreshTibo(ctx);
       void checkForUpdates(ctx);
     }, TICK_MS);
-    await refresh(ctx, true);
-    void checkForUpdates(ctx);
+
+    void (async () => {
+      await loadMode();
+      if (!sessionActive) return;
+      installCachedValues();
+      if ((ctx.models.current() ?? ctx.model)?.provider === "openai-codex") show(ctx);
+      // Expensive checks happen independently after the editor is ready.
+      void refresh(ctx);
+      void refreshTibo(ctx);
+      void checkForUpdates(ctx);
+      void prepareNativeLayout(ctx).then(() => {
+        if (sessionActive && !nativeLayoutReady) clear(ctx);
+      });
+      void initializeSettingsPath();
+    })().catch(() => {});
   });
-  pi.on("session_switch", async (_event, ctx) => { await refresh(ctx); });
-  pi.on("turn_start", async (_event, ctx) => { await refresh(ctx); });
-  pi.on("turn_end", async (_event, ctx) => { await refresh(ctx); });
+  pi.on("session_switch", (_event, ctx) => { void refresh(ctx); });
+  pi.on("turn_start", (_event, ctx) => { void refresh(ctx); });
+  pi.on("turn_end", (_event, ctx) => { void refresh(ctx); });
   pi.on("session_shutdown", (_event, ctx) => {
     if (ctx.mode === "tui" && ctx.agent.kind === "main") {
       sessionActive = false;
@@ -980,7 +1131,7 @@ export default function codexRemaining(pi: ExtensionAPI): void {
   };
 
   pi.registerCommand("codex-remaining", {
-    description: "Codex quota & alerts; compact | bars | toggle | refresh | updates | alerts | help",
+    description: "Codex quotas, alerts & Tibo; compact | bars | refresh | updates | alerts | tibo | help",
     getArgumentCompletions: subcommandCompletions,
     handler: async (args, ctx) => {
       const arg = args.trim().toLowerCase();
@@ -1016,6 +1167,38 @@ export default function codexRemaining(pi: ExtensionAPI): void {
         }
       } else if (arg === "updates check") {
         await checkForUpdates(ctx, true);
+      } else if (arg === "tibo") {
+        if (!preferences.tiboEnabled) {
+          ctx.ui.notify("Tibo community resets are off. Use /codex-remaining tibo on to enable.", "info");
+        } else {
+          const regular = tibo?.regular?.announcedAt?.slice(0,10) ?? "unknown";
+          const banked = tibo?.banked?.announcedAt?.slice(0,10) ?? "unknown";
+          const scheduled = tibo?.scheduled
+            ? ` · Upcoming ${tibo.scheduled.type} by ${tibo.scheduled.scheduledFor.slice(0,10)} (not guaranteed)`
+            : " · No upcoming confirmed announcement";
+          const stale = tibo?.stale ? " [STALE]" : "";
+          ctx.ui.notify(`Tibo (community)${stale}: last regular reset ${regular} · last banked reset ${banked}${scheduled}. Source: https://tibo.cc`, "info");
+        }
+      } else if (arg === "tibo on" || arg === "tibo off") {
+        const enabled = arg === "tibo on";
+        preferences.tiboEnabled = enabled;
+        if (enabled) tiboNextCheckAt = 0;
+        try {
+          await savePreferences();
+          ctx.ui.notify(`Tibo community reset display ${enabled ? "enabled" : "disabled"} (saved).`, "info");
+        } catch {
+          ctx.ui.notify("Could not save Tibo setting.", "warning");
+        }
+        if ((ctx.models.current() ?? ctx.model)?.provider === "openai-codex") show(ctx);
+        if (enabled) void refreshTibo(ctx);
+      } else if (arg === "tibo refresh") {
+        if (!preferences.tiboEnabled) {
+          ctx.ui.notify("Enable Tibo first with /codex-remaining tibo on.", "warning");
+        } else {
+          const ok = await refreshTibo(ctx,true);
+          ctx.ui.notify(ok ? `Tibo community data refreshed: ${tiboInline(tibo)}`
+            : "Tibo data unavailable; showing stale records if present.", ok ? "info" : "warning");
+        }
       } else if (arg === "alerts") {
         ctx.ui.notify(
           `Codex Remaining quota alerts: ${preferences.quotaAlerts ? "on" : "off"}, warning <=${preferences.quotaWarningPercent}%, critical <=10%, for 5h and 7d.`,
@@ -1037,6 +1220,8 @@ export default function codexRemaining(pi: ExtensionAPI): void {
           preferences = previous;
           ctx.ui.notify("Could not save quota-alert preference.", "warning");
         }
+      } else if (arg === "alerts threshold") {
+        ctx.ui.notify("Set a warning threshold: /codex-remaining alerts threshold 20 (choose 10–90%). Critical stays at 10%.", "info");
       } else if (/^alerts threshold +\d+$/.test(arg)) {
         const threshold = Number(arg.slice("alerts threshold ".length));
         if (!Number.isInteger(threshold) || threshold < 10 || threshold > 90) {

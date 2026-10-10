@@ -47,7 +47,7 @@ for(const s of ["/codex-remaining              Show this help","/codex-remaining
   assert(commands.includes(s), "missing command in help: "+s);
 }
 assert(commands.includes("Layout: bars"), "must describe active mode");
-const allCommands = ["help", "compact", "bars", "toggle", "refresh", "updates", "alerts"];
+const allCommands = ["help", "compact", "bars", "toggle", "refresh", "updates", "alerts", "tibo"];
 const completeAtSpace = completer!("");
 assert(completeAtSpace?.map(x => x.label).join(",") === allCommands.join(","), "Tab must list all subcommands");
 assert(completeAtSpace.every((x: any) => typeof x.description === "string" && x.description.length > 10),
@@ -58,7 +58,9 @@ assert(completer!("unknown") === null, "no unrelated matches");
 assert(completer!("bars ") === null, "no unrelated nested completions");
 assert(completer!("updates ")?.map(x => x.label).join(",") === "on,off,check", "nested update actions");
 assert(completer!("updates c")?.map(x => x.label).join(",") === "check", "nested update filtering");
-console.log("PASS Tab completions and descriptions for all seven subcommands and nested actions");
+assert(completer!("tibo ")?.map(x => x.label).join(",") === "on,off,refresh", "nested Tibo actions");
+assert(completer!("tibo r")?.map(x => x.label).join(",") === "refresh", "nested Tibo filtering");
+console.log("PASS Tab completions and descriptions for all eight subcommands and nested actions");
 
 await handler!("",ctx);
 await handler!("help",ctx);
@@ -69,11 +71,15 @@ assert(notices.length === 0, "help must not trigger quota-refreshed notification
 console.log("PASS bare command and help alias show modal; no force-refresh; 5 terminal widths; Enter/Esc/q close");
 
 await handler!("updates",ctx);
-assert(notices.some(n=>n.includes("npm update checks: on") && n.includes("installed v0.1.6")),
+assert(notices.some(n=>n.includes("npm update checks: on") && n.includes("installed v0.1.7")),
   "updates status reports enabled state and current version");
 await handler!("alerts",ctx);
 assert(notices.some(n=>n.includes("quota alerts: on") && n.includes("warning <=20%")),
   "alerts status reports initial warning and critical settings");
+await handler!("alerts threshold",ctx);
+assert(notices.some(n => n.includes("/codex-remaining alerts threshold 20")), "threshold without number explains valid syntax");
+await handler!("tibo",ctx);
+assert(notices.some(n => n.includes("Tibo (community)")), "Tibo status available without requiring quota fetch");
 await handler!("alerts threshold 5",ctx);
 assert(notices.some(n=>n.includes("between 10 and 90 percent")),
   "invalid alert thresholds rejected");
@@ -115,7 +121,7 @@ for (const item of noSpace!.items) {
   assert(applied.lines[0] === "/codex-remaining " + item.label + " ", "Tab selection inserts " + item.label);
 }
 const fullList = await wrapped.getSuggestions(["/codex-remaining"], 0, 16);
-assert(fullList?.items.length === 7, "async completion also lists all seven commands");
+assert(fullList?.items.length === 8, "async completion also lists all seven commands");
 assert(baseCalls.length === 0, "exact command must not fall through to OMP default suggestions");
 const unrelated = await wrapped.getSuggestions(["/help"], 0, 5);
 assert(unrelated?.items[0]?.label === "other", "unrelated commands delegate to default suggestions");
@@ -172,7 +178,7 @@ console.log("PASS real OMP nested-Tab routing after update/alert selection, forc
  * real command text, for both bare and argument completions.
  */
 const chainedRoot = wrapped.trySyncSlashCompletion!("/codex-remaining")!;
-for (const name of ["updates", "alerts"]) {
+for (const name of ["updates", "alerts", "tibo"]) {
   const item = chainedRoot.items.find(i => i.label === name)!;
   assert(item.value.endsWith("/"), name + " opts into OMP native chaining");
   const applied = wrapped.applyCompletion(["/codex-remaining"], 0, 16, item, chainedRoot.prefix);
@@ -182,6 +188,7 @@ for (const name of ["updates", "alerts"]) {
 for (const [typed, expectedLabel, expectedResult, expectedNext] of [
   ["/codex-remaining up", "updates", "/codex-remaining updates ", "on"],
   ["/codex-remaining al", "alerts", "/codex-remaining alerts ", "on"],
+  ["/codex-remaining ti", "tibo", "/codex-remaining tibo ", "on"],
   ["/codex-remaining alerts th", "threshold", "/codex-remaining alerts threshold ", "10"],
   ["/codex-remaining ", "updates", "/codex-remaining updates ", "on"],
 ] as const) {

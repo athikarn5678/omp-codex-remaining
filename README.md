@@ -7,16 +7,18 @@ An unofficial **Oh My Pi (OMP)** extension showing **remaining OpenAI Codex quot
 - **Compact:** 5h/7d remaining percentages, reset countdowns, plan, and reset credits.
 - **Bars (default):** two colored progress bars with reset date/time in your local timezone.
 - Five colors: 0–20% red, 21–40% orange, 41–60% yellow, 61–80% lime, 81–100% green.
+- **Fast startup and model switching (v0.1.7):** registers commands immediately, shows cached quota or a loading indicator before CLI fetching completes, and detects provider switches within about 250ms. Network/CLI/config checks run in the background. Cached quota is clearly marked stale until refreshed.
 - Automatically refreshes usage every 5 minutes, countdowns every 30 seconds; retries failures after 1 minute and marks cached data as stale.
 - Tab completion for every command, with descriptive options; remembers the selected layout.
 - **Native Right Arrow chaining (v0.1.6):** choosing `updates`, `alerts`, or `alerts threshold` opens its nested menu automatically in OMP 18.8.8, without pressing Tab again.
 - **Update notifications (v0.1.4+):** checks public npm metadata at most once per 24 hours, notifies once per new version, never auto-upgrades. Can be disabled.
 - **Low quota alerts (v0.1.5):** alerts when Codex 5h or 7d remaining quota falls to 20% (warning) or 10% (critical). Each alert level is shown only once per reset window; choose a warning threshold or disable alerts.
+- **Tibo public announcements (v0.1.7):** shows the last regular reset and last banked (bonus credit) reset, and any current scheduled deadline, after your real plan/credits separated by `│`. The community API is read-only, fetched in the background at most every 20 minutes, and can be toggled off.
 - Uses local `omp usage` (no separate API key).
 
 ## Requirements
 
-**OMP 18.8.7+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Verified locally on Windows OMP 18.8.8 (including Editor key handling for Tab/Right Arrow); the GitHub Actions matrix is configured for Windows, macOS, and Linux, but passing CI does not replace real TUI testing on each OS.
+**OMP 18.8.8+**, an OpenAI Codex account already connected to OMP, and an active `openai-codex` model. The `omp` command must be available on PATH or discoverable as the running executable. Verified locally on Windows OMP 18.8.8 (including Editor key handling for Tab/Right Arrow); the GitHub Actions matrix is configured for Windows, macOS, and Linux, but passing CI does not replace real TUI testing on each OS.
 
 ## Install
 
@@ -70,10 +72,14 @@ Restart OMP afterward. The saved layout preference is stored separately in `code
 | `/codex-remaining alerts on` | Enable low quota alerts (default) |
 | `/codex-remaining alerts off` | Disable low quota alerts |
 | `/codex-remaining alerts threshold 20` | Set warning threshold to 10–90% (critical remains at 10%) |
+| `/codex-remaining tibo` | Show public reset/bonus credit announcement status |
+| `/codex-remaining tibo on` | Show Tibo information after plan/credits (default) |
+| `/codex-remaining tibo off` | Hide Tibo and stop its background requests |
+| `/codex-remaining tibo refresh` | Force check new Tibo regular and banked reset records |
 
 The Help screen lists the commands, current layout and automatic refresh schedule. Close it with **Enter**, **Esc** or **q**. Opening Help does not fetch new quota data.
 
-**Tab autocomplete:** Type `/codex-remaining` and press **Tab** to open all seven subcommands (`help`, `compact`, `bars`, `toggle`, `refresh`, `updates`, `alerts`) with a description beside each option. Select a command from the list and press Enter to run it. Autocomplete also works after a space, for example `/codex-remaining ` + Tab, and filters as you type (e.g. `/codex-remaining re` + Tab). **v0.1.6 nested menus:** On OMP 18.8.8, selecting `updates` using **Right Arrow or Tab** automatically opens `on`, `off`, `check` without an extra Tab. Selecting `alerts` automatically opens `on`, `off`, `threshold`; selecting `threshold` opens common percentage presets. The right arrow accepts a popup selection only when the caret is at the end of the input; otherwise it moves the caret normally. You can also type a custom integer from 10 to 90.
+**Tab autocomplete:** Type `/codex-remaining` and press **Tab** to open all eight subcommands (`help`, `compact`, `bars`, `toggle`, `refresh`, `updates`, `alerts`, `tibo`) with a description beside each option. Select a command from the list and press Enter to run it. Autocomplete also works after a space, for example `/codex-remaining ` + Tab, and filters as you type (e.g. `/codex-remaining re` + Tab). **v0.1.6 nested menus:** On OMP 18.8.8, selecting `updates` using **Right Arrow or Tab** automatically opens `on`, `off`, `check` without an extra Tab. Selecting `alerts` automatically opens `on`, `off`, `threshold`; selecting `threshold` opens common percentage presets. The right arrow accepts a popup selection only when the caret is at the end of the input; otherwise it moves the caret normally. `/codex-remaining alerts threshold` without a number displays syntax help instead of silently failing. You can also type a custom integer from 10 to 90.
 
 Layout, npm update checks, and low-quota alerts are saved automatically to `codex-remaining-settings.json` under the directory returned by `omp config path`.
 
@@ -82,6 +88,16 @@ Layout, npm update checks, and low-quota alerts are saved automatically to `code
 The default warning level is **20% remaining**, with a separate **critical level at 10%** for both Codex 5-hour and 7-day quotas. Alerts use the most recently successfully fetched quota data; failed or stale fetches do not trigger new alerts. A message for a given level and reset window is not repeated across refreshes or restarts. If quota recovers above the warning threshold, or a new quota reset period begins, warnings can be triggered again.
 
 Use `/codex-remaining alerts off` to disable automatic warnings, `alerts on` to re-enable, or `alerts threshold 15` to set a 15% warning threshold. The critical level remains at 10%. These preferences are saved in `codex-remaining-settings.json`. The extension does not request separate API keys or change your OMP configuration.
+
+## Tibo public reset tracker
+
+Tibo is a **community** data service ([tibo.cc](https://tibo.cc/guide/api)), not an official OpenAI endpoint. The inline separator clearly distinguishes your actual account plan and banked credits (from OMP) from publicly announced reset events:
+
+```text
+⏱ Plus · ✦ 3 exp 12d 1h  │  Tibo: Reset 7 Oct · Banked 8 Oct
+```
+
+`Reset` is the latest regular quota-reset announcement. `Banked` is the latest public announcement about bonus/banked reset credits; it **does not** confirm that a credit was delivered to your personal account. If a future announcement includes a deadline, it is displayed as `Next ... by [date]`, not an exact guaranteed reset time. Stale records are labeled `(stale)` and outages never block the quota widget. The data loads asynchronously, can be cached locally, and can be disabled with `/codex-remaining tibo off`.
 
 ## Native status-line behavior
 
