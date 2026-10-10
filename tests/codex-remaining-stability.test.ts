@@ -49,8 +49,10 @@ for (const width of [1, 2, 5, 6, 8, 14, 25, 40, 70, 100, 140]) {
 }
 assert(parseDisplayMode("compact") === "compact", "saved compact preference");
 assert(parseDisplayMode("malformed") === "bars", "invalid preference fallback");
-assert(resolveOmpExecutable(() => undefined, ["C:\\Apps\\omp.exe", "C:\\Apps\\bun.exe"]) === "C:\\Apps\\omp.exe",
-  "OMP resolver falls back to known executable");
+const ompPath = process.platform === "win32" ? "C:\\Apps\\omp.exe" : "/usr/local/bin/omp";
+const otherPath = process.platform === "win32" ? "C:\\Apps\\bun.exe" : "/usr/local/bin/bun";
+assert(resolveOmpExecutable(() => undefined, [ompPath, otherPath]) === ompPath,
+  "OMP resolver falls back to known executable on the active OS");
 console.log("PASS quota math, bar-only payload, colors, terminal widths, preferences, and executable discovery");
 
 const readOnly = (preset: string, left: string, right: string) => {
